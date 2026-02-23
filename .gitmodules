@@ -1,8 +1,6 @@
 [submodule "robocasa"]
 	path = robocasa
-	url = https://github.com/TidyBot-Services/robocasa.git
-	branch = tidyverse
+	url = https://github.com/robocasa/robocasa.git
 [submodule "robosuite"]
 	path = robosuite
-	url = https://github.com/TidyBot-Services/robosuite.git
-	branch = tidyverse
+	url = https://github.com/ARISE-Initiative/robosuite.git

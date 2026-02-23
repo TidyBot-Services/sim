@@ -1,0 +1,58 @@
+<mujoco model="tidyverse_robotiq_85_model">
+    <asset>
+        <!-- TidyVerse base link mesh (long coupling adapter, meters, no scale needed) -->
+        <mesh name="robotiq_arg2f_base_link" file="meshes/tidyverse_robotiq_85/robotiq_85_base_link_col.stl" />
+        <mesh name="robotiq_arg2f_base_link_vis" file="meshes/tidyverse_robotiq_85/robotiq_85_base_link_vis.stl" />
+        <!-- TidyVerse finger tip mesh (meters, no scale needed) -->
+        <mesh name="tidyverse_finger_tip" file="meshes/tidyverse_robotiq_85/robotiq_85_finger_tip_link.stl" />
+        <mesh name="tidyverse_finger_tip_vis" file="meshes/tidyverse_robotiq_85/robotiq_85_finger_tip_link.stl" />
+    </asset>
+
+    <actuator>
+        <position ctrllimited="true" ctrlrange="0.0 0.06" joint="finger_joint1" kp="1000" name="gripper_finger_joint1" forcelimited="true" forcerange="-20 20"/>
+        <position ctrllimited="true" ctrlrange="-0.06 0.0" joint="finger_joint2" kp="1000" name="gripper_finger_joint2" forcelimited="true" forcerange="-20 20"/>
+    </actuator>
+
+    <worldbody>
+        <body name="robotiq_85_adapter_link" pos="0.0 0 0">
+            <site name="ft_frame" pos="0 0 0" size="0.01 0.01 0.01" rgba="1 0 0 1" type="sphere" group="1" />
+            <inertial pos="0 0 0" mass="0.01" diaginertia="0.001 0.001 0.001" />
+            <!-- TidyVerse base link rotated for URDF-to-MuJoCo frame -->
+            <geom type="mesh" contype="0" conaffinity="0" group="1" rgba="0.1 0.1 0.1 1" name="hand_visual" mesh="robotiq_arg2f_base_link_vis" quat="0 0.7071 0 0.7071" />
+            <geom type="mesh" group="0" rgba="0.1 0.1 0.1 1" mesh="robotiq_arg2f_base_link" name="hand_collision" quat="0 0.7071 0 0.7071" />
+
+            <!-- eye-in-hand camera (TidyVerse-specific offset for long coupling) -->
+            <camera mode="fixed" name="eye_in_hand" pos="-0.05 0 0.27" quat="0 0.707108 0.707108 0" fovy="75"/>
+
+            <!-- eef site between the finger tips -->
+            <body name="eef" pos="0 0 0.145" quat="0.707105 0 0 -0.707105">
+                <site name="grip_site" pos="0 0 0" size="0.01 0.01 0.01" rgba="1 0 0 0.5" type="sphere" group="1"/>
+                <site name="ee_x" pos="0.1 0 0" size="0.005 .1"  quat="0.707105  0 0.707108 0 " rgba="1 0 0 0" type="cylinder" group="1"/>
+                <site name="ee_y" pos="0 0.1 0" size="0.005 .1" quat="0.707105 0.707108 0 0" rgba="0 1 0 0" type="cylinder" group="1"/>
+                <site name="ee_z" pos="0 0 0.1" size="0.005 .1" quat="1 0 0 0" rgba="0 0 1 0" type="cylinder" group="1"/>
+                <site name="grip_site_cylinder" pos="0 0 0" size="0.005 10" rgba="0 1 0 0.3" type="cylinder" group="1"/>
+            </body>
+
+            <!-- Left finger: slides in +Y direction to open -->
+            <body name="leftfinger" pos="0 -0.06 0.098">
+                <inertial pos="0 0 0.02" mass="0.1" diaginertia="0.01 0.01 0.005" />
+                <joint name="finger_joint1" pos="0 0 0" axis="0 1 0" type="slide" limited="true" range="0.0 0.06" damping="100" armature="1.0" frictionloss="1.0"/>
+                <geom type="mesh" contype="0" conaffinity="0" group="1" rgba="0.1 0.1 0.1 1" name="left_finger_tip_visual" mesh="tidyverse_finger_tip_vis" quat="0.707107 0 -0.707107 0" />
+                <geom type="mesh" group="0" rgba="0.1 0.1 0.1 1" name="left_finger_tip_collision" mesh="tidyverse_finger_tip" solref="0.01 0.25" quat="0.707107 0 -0.707107 0" conaffinity="1" contype="1" friction="2 0.05 0.0001" condim="4"/>
+            </body>
+
+            <!-- Right finger: slides in -Y direction to open -->
+            <body name="rightfinger" pos="0 0.06 0.098">
+                <inertial pos="0 0 0.02" mass="0.1" diaginertia="0.01 0.01 0.005" />
+                <joint name="finger_joint2" pos="0 0 0" axis="0 1 0" type="slide" limited="true" range="-0.06 0.0" damping="100" armature="1.0" frictionloss="1.0"/>
+                <geom type="mesh" contype="0" conaffinity="0" group="1" rgba="0.1 0.1 0.1 1" name="right_finger_tip_visual" mesh="tidyverse_finger_tip_vis" quat="0 0.707107 0 0.707107" />
+                <geom type="mesh" group="0" rgba="0.1 0.1 0.1 1" name="right_finger_tip_collision" mesh="tidyverse_finger_tip" solref="0.01 0.25" quat="0 0.707107 0 0.707107" conaffinity="1" contype="1" friction="2 0.05 0.0001" condim="4"/>
+            </body>
+        </body>
+    </worldbody>
+
+    <sensor>
+        <force name="force_ee" site="ft_frame"/>
+        <torque name="torque_ee" site="ft_frame"/>
+    </sensor>
+</mujoco>
