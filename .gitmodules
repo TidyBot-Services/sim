@@ -1,0 +1,8 @@
+[submodule "robocasa"]
+	path = robocasa
+	url = https://github.com/TidyBot-Services/robocasa.git
+	branch = tidyverse
+[submodule "robosuite"]
+	path = robosuite
+	url = https://github.com/TidyBot-Services/robosuite.git
+	branch = tidyverse
