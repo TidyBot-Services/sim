@@ -61,6 +61,10 @@ class SimRobot:
         # Cache robot reference
         self.robot = self.env.robots[0]
         self.sim = self.env.sim
+
+        # Fix eye-in-hand camera position for TidyVerse (longer gripper coupling)
+        if robot_name == "TidyVerse":
+            self._fix_eye_in_hand_camera()
         self._arm = self.robot.arms[0]  # "right"
 
         # Cache the initial joint configuration (used for go_home)
@@ -81,6 +85,22 @@ class SimRobot:
 
         # Gripper state: True = closed
         self._gripper_closed = False
+
+    def _fix_eye_in_hand_camera(self):
+        """Reposition the eye_in_hand camera for the TidyVerse gripper coupling.
+
+        Robocasa's Kitchen._postprocess_model overwrites camera positions
+        from CAM_CONFIGS at model compile time. Since we don't patch robocasa,
+        we fix the compiled MuJoCo model directly after env.reset().
+        """
+        import mujoco
+        cam_name = "robot0_eye_in_hand"
+        cam_id = mujoco.mj_name2id(
+            self.sim.model._model, mujoco.mjtObj.mjOBJ_CAMERA, cam_name
+        )
+        if cam_id >= 0:
+            self.sim.model._model.cam_pos[cam_id] = [-0.05, 0, 0.27]
+            print(f"[sim_robot] Fixed {cam_name} camera position")
 
     # ------------------------------------------------------------------
     # Low-level helpers
