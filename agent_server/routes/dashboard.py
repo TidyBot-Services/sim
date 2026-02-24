@@ -412,5 +412,7 @@ function updateCameras() {
   }
 }
 setInterval(updateCameras, 500);
+
+
 </script>
 </body></html>"""

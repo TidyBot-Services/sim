@@ -209,6 +209,37 @@ class SimRobot:
             return self._last_obs[obs_key]
         raise KeyError(f"Camera '{name}' not found in observations. Available: {list(self._last_obs.keys())}")
 
+    def render_camera_jpeg(self, name="robot0_agentview_center", width=256, height=256, quality=85):
+        """Render a JPEG frame from the named camera using MuJoCo's native renderer.
+
+        Works without offscreen rendering enabled — uses mujoco.Renderer directly.
+        """
+        import io
+        import mujoco
+        from PIL import Image
+
+        model = self.sim.model._model
+        data = self.sim.data._data
+
+        if not hasattr(self, '_renderers'):
+            self._renderers = {}
+
+        key = (name, width, height)
+        if key not in self._renderers:
+            self._renderers[key] = mujoco.Renderer(model, height, width)
+
+        renderer = self._renderers[key]
+        opt = mujoco.MjvOption()
+        opt.geomgroup[0] = False       # hide collision geoms
+        opt.sitegroup[:] = [False] * 6  # hide sites
+
+        renderer.update_scene(data, camera=name, scene_option=opt)
+        frame = renderer.render().copy()
+
+        buf = io.BytesIO()
+        Image.fromarray(frame).save(buf, format="JPEG", quality=quality)
+        return buf.getvalue()
+
     # ------------------------------------------------------------------
     # Coordinate frame helpers
     # ------------------------------------------------------------------

@@ -4,7 +4,6 @@ Uses the same remote YOLO server as the real TidyBot SDK, but sources camera
 frames from the sim instead of the real robot's camera endpoint.
 """
 
-import io
 import warnings
 from dataclasses import dataclass, field
 
@@ -48,15 +47,6 @@ class SegmentationResult3D:
     image_height: int = 0
 
 
-def _encode_frame_to_jpeg(frame):
-    """Encode a numpy RGB array (H, W, 3) to JPEG bytes."""
-    from PIL import Image
-    img = Image.fromarray(frame)
-    buf = io.BytesIO()
-    img.save(buf, format="JPEG")
-    return buf.getvalue()
-
-
 def segment_image(image_bytes, confidence=0.5, classes=None):
     """Run segmentation on raw JPEG image bytes.
 
@@ -68,21 +58,20 @@ def segment_image(image_bytes, confidence=0.5, classes=None):
     Returns:
         SegmentationResult with detected objects.
     """
-    import requests
+    import httpx
 
-    files = {"file": ("frame.jpg", image_bytes, "image/jpeg")}
-    data = {"confidence": str(confidence)}
-    if classes:
-        data["classes"] = ",".join(classes)
+    prompt = ",".join(classes) if classes else "object"
+    files = {"image_file": ("frame.jpg", image_bytes, "image/jpeg")}
+    data = {"text_prompt": prompt, "confidence": str(confidence)}
 
-    resp = requests.post(f"{YOLO_SERVER_URL}/segment", files=files, data=data, timeout=30)
+    resp = httpx.post(f"{YOLO_SERVER_URL}/segment", files=files, data=data, timeout=30)
     resp.raise_for_status()
     raw = resp.json()
 
     detections = []
-    for det in raw:
+    for det in raw.get("detections", raw if isinstance(raw, list) else []):
         detections.append(Detection(
-            label=det.get("label", ""),
+            label=det.get("class_name", det.get("label", "")),
             confidence=det.get("confidence", 0.0),
             bbox=det.get("bbox", []),
             mask=det.get("mask", []),
@@ -102,13 +91,8 @@ def segment_camera(camera_name="robot0_agentview_center", confidence=0.5, classe
     Returns:
         SegmentationResult with detected objects.
     """
-    frame = get_robot().get_camera_frame(camera_name)
-    jpeg_bytes = _encode_frame_to_jpeg(frame)
-    result = segment_image(jpeg_bytes, confidence=confidence, classes=classes)
-
-    # Record image dimensions from the frame
-    result.image_height, result.image_width = frame.shape[:2]
-    return result
+    jpeg_bytes = get_robot().render_camera_jpeg(camera_name)
+    return segment_image(jpeg_bytes, confidence=confidence, classes=classes)
 
 
 def segment_camera_3d(camera_name="robot0_agentview_center", confidence=0.5, classes=None):
@@ -152,16 +136,13 @@ def segment_visualization(camera_name="robot0_agentview_center", confidence=0.5,
     Returns:
         JPEG bytes of the annotated image.
     """
-    frame = get_robot().get_camera_frame(camera_name)
-    jpeg_bytes = _encode_frame_to_jpeg(frame)
+    import httpx
 
-    import requests
+    jpeg_bytes = get_robot().render_camera_jpeg(camera_name)
+    prompt = ",".join(classes) if classes else "object"
+    files = {"image_file": ("frame.jpg", jpeg_bytes, "image/jpeg")}
+    data = {"text_prompt": prompt, "confidence": str(confidence)}
 
-    files = {"file": ("frame.jpg", jpeg_bytes, "image/jpeg")}
-    data = {"confidence": str(confidence)}
-    if classes:
-        data["classes"] = ",".join(classes)
-
-    resp = requests.post(f"{YOLO_SERVER_URL}/segment_visualization", files=files, data=data, timeout=30)
+    resp = httpx.post(f"{YOLO_SERVER_URL}/segment_visualization", files=files, data=data, timeout=30)
     resp.raise_for_status()
     return resp.content

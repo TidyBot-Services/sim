@@ -7,5 +7,8 @@ mujoco>=3.3.0
 Pillow
 numpy
 
+# Camera server
+httpx
+
 # Robocasa & Robosuite (install via their setup.py, but these are the key deps)
 # pip install -e robosuite/ && pip install -e robocasa/

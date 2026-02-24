@@ -11,6 +11,7 @@ import logging
 import os
 import pickle
 import sys
+import threading
 import time
 from collections import deque
 
@@ -88,6 +89,8 @@ class _Runtime:
         self._stepping = False      # True while a physics step is in flight
         self._command_running = False
         self.initial_sim_state = None  # saved qpos/qvel after scene setup
+        self._camera_server = None    # uvicorn.Server for camera_server
+        self._camera_thread = None    # Thread running camera server
 
     def get_robot(self):
         if self.robot is None:
@@ -230,6 +233,45 @@ def _on_lease_end():
 
 
 # ---------------------------------------------------------------------------
+# Camera server — auto-started/stopped with the simulation
+# ---------------------------------------------------------------------------
+
+def _start_camera_server():
+    """Start the camera_server in a background thread via uvicorn."""
+    import uvicorn
+    from camera_server.config import CameraServerConfig
+    from camera_server.server import app as cam_app, configure as cam_configure
+
+    cfg = CameraServerConfig(
+        agent_server_url=f"http://localhost:{_cfg.port}",
+    )
+    cam_configure(cfg)
+
+    uv_cfg = uvicorn.Config(
+        cam_app,
+        host=cfg.host,
+        port=cfg.port,
+        log_level="warning",
+    )
+    server = uvicorn.Server(uv_cfg)
+    _rt._camera_server = server
+    _rt._camera_thread = threading.Thread(target=server.run, daemon=True)
+    _rt._camera_thread.start()
+    print(f"[server] Camera server started on port {cfg.port}")
+
+
+def _stop_camera_server():
+    """Signal the camera server to shut down."""
+    if _rt._camera_server is not None:
+        _rt._camera_server.should_exit = True
+        if _rt._camera_thread is not None:
+            _rt._camera_thread.join(timeout=5)
+            _rt._camera_thread = None
+        _rt._camera_server = None
+        print("[server] Camera server stopped")
+
+
+# ---------------------------------------------------------------------------
 # Sim control endpoints
 # ---------------------------------------------------------------------------
 
@@ -341,6 +383,9 @@ async def start_sim(body: StartRequest = StartRequest()):
     _sim_start_time = time.time()
     _rt.step_task = asyncio.create_task(_step_loop())
 
+    # Auto-start camera server
+    _start_camera_server()
+
     print("[server] Simulation ready")
     return {"ok": True, "message": "simulation started"}
 
@@ -354,6 +399,10 @@ async def stop_sim():
 
     _rt.running = False
     _sim_start_time = None
+
+    # Stop camera server
+    _stop_camera_server()
+
     if _rt.step_task:
         _rt.step_task.cancel()
         try:
