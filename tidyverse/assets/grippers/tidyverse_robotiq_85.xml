@@ -21,9 +21,6 @@
             <geom type="mesh" contype="0" conaffinity="0" group="1" rgba="0.1 0.1 0.1 1" name="hand_visual" mesh="robotiq_arg2f_base_link_vis" quat="0 0.7071 0 0.7071" />
             <geom type="mesh" group="0" rgba="0.1 0.1 0.1 1" mesh="robotiq_arg2f_base_link" name="hand_collision" quat="0 0.7071 0 0.7071" />
 
-            <!-- eye-in-hand camera (TidyVerse-specific offset for long coupling) -->
-            <camera mode="fixed" name="eye_in_hand" pos="-0.05 0 0.27" quat="0 0.707108 0.707108 0" fovy="75"/>
-
             <!-- eef site between the finger tips -->
             <body name="eef" pos="0 0 0.145" quat="0.707105 0 0 -0.707105">
                 <site name="grip_site" pos="0 0 0" size="0.01 0.01 0.01" rgba="1 0 0 0.5" type="sphere" group="1"/>

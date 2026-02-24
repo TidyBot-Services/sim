@@ -62,9 +62,9 @@ class SimRobot:
         self.robot = self.env.robots[0]
         self.sim = self.env.sim
 
-        # Fix eye-in-hand camera position for TidyVerse (longer gripper coupling)
+        # Fix camera positions for TidyVerse
         if robot_name == "TidyVerse":
-            self._fix_eye_in_hand_camera()
+            self._fix_tidyverse_cameras()
         self._arm = self.robot.arms[0]  # "right"
 
         # Cache the initial joint configuration (used for go_home)
@@ -86,21 +86,43 @@ class SimRobot:
         # Gripper state: True = closed
         self._gripper_closed = False
 
-    def _fix_eye_in_hand_camera(self):
-        """Reposition the eye_in_hand camera for the TidyVerse gripper coupling.
+    def _fix_tidyverse_cameras(self):
+        """Reposition cameras for TidyVerse robot geometry.
 
         Robocasa's Kitchen._postprocess_model overwrites camera positions
         from CAM_CONFIGS at model compile time. Since we don't patch robocasa,
         we fix the compiled MuJoCo model directly after env.reset().
         """
         import mujoco
-        cam_name = "robot0_eye_in_hand"
-        cam_id = mujoco.mj_name2id(
-            self.sim.model._model, mujoco.mjtObj.mjOBJ_CAMERA, cam_name
-        )
-        if cam_id >= 0:
-            self.sim.model._model.cam_pos[cam_id] = [-0.05, 0, 0.27]
-            print(f"[sim_robot] Fixed {cam_name} camera position")
+        model = self.sim.model._model
+
+        cam_overrides = {
+            # Wrist camera: offset for longer gripper coupling adapter
+            "robot0_eye_in_hand": {"pos": [-0.05, 0, 0.27]},
+            # Base camera: mounted on mast at front-left of base,
+            # looking forward and slightly down toward the workspace.
+            # Coordinates are relative to mobilebase0_support body
+            # (which is at the arm mount: 0.435, 0.254, 0.47225 from base center).
+            # Base camera: front edge of base, centered, base-top height,
+            # looking forward (+X). MuJoCo camera looks along -Z by default;
+            # rotate -90° around Y to face +X: quat [w,x,y,z] = [0.707,0,-0.707,0]
+            "robot0_agentview_center": {
+                "pos": [0.17, 0.0, 0.0],
+                "quat": [0.5, 0.5, -0.5, -0.5],
+            },
+        }
+
+        for cam_name, overrides in cam_overrides.items():
+            cam_id = mujoco.mj_name2id(
+                model, mujoco.mjtObj.mjOBJ_CAMERA, cam_name
+            )
+            if cam_id < 0:
+                continue
+            if "pos" in overrides:
+                model.cam_pos[cam_id] = overrides["pos"]
+            if "quat" in overrides:
+                model.cam_quat[cam_id] = overrides["quat"]
+            print(f"[sim_robot] Fixed {cam_name} camera")
 
     # ------------------------------------------------------------------
     # Low-level helpers
