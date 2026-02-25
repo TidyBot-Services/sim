@@ -8,7 +8,7 @@ import robosuite.utils.transform_utils as T
 from robosuite.utils.control_utils import orientation_error
 from robosuite.controllers import load_composite_controller_config
 
-from agent_server.config import (
+from sim.config import (
     ARM_MAX_STEPS,
     ARM_ORI_TOL,
     ARM_OUTPUT_MAX_ORI,
@@ -51,6 +51,7 @@ class SimRobot:
             use_camera_obs=use_camera_obs,
             control_freq=CONTROL_FREQ,
             renderer="mjviewer",
+            obj_registries=("aigen",),
             **env_kwargs,
         )
 
@@ -67,9 +68,6 @@ class SimRobot:
             self._fix_tidyverse_cameras()
         self._arm = self.robot.arms[0]  # "right"
 
-        # Cache the initial joint configuration (used for go_home)
-        self._home_qpos = self.robot.robot_model.init_qpos.copy()
-
         # Store the EE site id for fast lookup
         self._eef_site_id = self.robot.eef_site_id[self._arm]
 
@@ -77,14 +75,22 @@ class SimRobot:
         self._base_site_name = self.robot.robot_model.base.correct_naming("center")
         self._base_site_id = self.sim.model.site_name2id(self._base_site_name)
 
+        # Cache initial joint configuration — the sim's natural starting state.
+        # The franka bridge remaps joints so the SDK sees its HOME_POSITION
+        # when the sim is at init_qpos. This offset makes "go home" = "go to start".
+        self._home_qpos = self.robot.robot_model.init_qpos.copy()
+        SDK_HOME = np.array([0.0, -0.785, 0.0, -2.356, 0.0, 1.913, 0.785])
+        self._joint_offset = SDK_HOME - self._home_qpos  # add to sim → SDK space
+
         # OSC output maxima — used to normalise delta commands to [-1, 1]
         self._output_max = np.array([
             ARM_OUTPUT_MAX_POS, ARM_OUTPUT_MAX_POS, ARM_OUTPUT_MAX_POS,
             ARM_OUTPUT_MAX_ORI, ARM_OUTPUT_MAX_ORI, ARM_OUTPUT_MAX_ORI,
         ])
 
-        # Gripper state: True = closed
+        # Open the gripper at start (matches go_home behaviour)
         self._gripper_closed = False
+        self.gripper_open()
 
     def _fix_tidyverse_cameras(self):
         """Reposition cameras for TidyVerse robot geometry.
@@ -98,14 +104,14 @@ class SimRobot:
 
         cam_overrides = {
             # Wrist camera: offset for longer gripper coupling adapter
-            "robot0_eye_in_hand": {"pos": [-0.05, 0, 0.27]},
+            "robot0_eye_in_hand": {"pos": [-0.05, 0, 0.27], "fovy": 42.5},
             # Base camera: mounted on mast at front-left of base,
             # looking forward and slightly down toward the workspace.
             # Coordinates are relative to mobilebase0_support body
             # (which is at the arm mount: 0.435, 0.254, 0.47225 from base center).
             # Base camera: front edge of base, centered, base-top height,
             # looking forward (+X). MuJoCo camera looks along -Z by default;
-            # rotate -90° around Y to face +X: quat [w,x,y,z] = [0.707,0,-0.707,0]
+            # rotate -90 around Y to face +X: quat [w,x,y,z] = [0.707,0,-0.707,0]
             "robot0_agentview_center": {
                 "pos": [0.17, 0.0, 0.0],
                 "quat": [0.5, 0.5, -0.5, -0.5],
@@ -122,6 +128,8 @@ class SimRobot:
                 model.cam_pos[cam_id] = overrides["pos"]
             if "quat" in overrides:
                 model.cam_quat[cam_id] = overrides["quat"]
+            if "fovy" in overrides:
+                model.cam_fovy[cam_id] = overrides["fovy"]
             print(f"[sim_robot] Fixed {cam_name} camera")
 
     # ------------------------------------------------------------------
@@ -164,7 +172,7 @@ class SimRobot:
         ])
 
     def get_base_pose(self):
-        """Return (xy_pos[2], yaw_radians) of the base in world frame."""
+        """Return (xy_pos[2], yaw_radians) in world frame."""
         pos = np.array(self.sim.data.site_xpos[self._base_site_id]).copy()
         mat = self.sim.data.site_xmat[self._base_site_id].reshape(3, 3)
         yaw = np.arctan2(mat[1, 0], mat[0, 0])
@@ -202,7 +210,7 @@ class SimRobot:
         if not self.env.has_offscreen_renderer:
             raise RuntimeError(
                 "Offscreen renderer not enabled. "
-                "Pass has_offscreen_renderer=True and use_camera_obs=True to agent_server.init()."
+                "Pass has_offscreen_renderer=True and use_camera_obs=True to init()."
             )
         obs_key = f"{name}_image"
         if obs_key in self._last_obs:
@@ -270,6 +278,51 @@ class SimRobot:
     # ------------------------------------------------------------------
     # Blocking arm control
     # ------------------------------------------------------------------
+
+    def track_ee_pose_step(self, target_pos, target_ori_mat):
+        """One physics step tracking a target EE pose (for streaming control).
+
+        Same delta computation as move_ee_to_pose, but only ONE step.
+        """
+        target_pos = np.asarray(target_pos).flatten()[:3]
+        target_ori_mat = np.asarray(target_ori_mat).reshape(3, 3)
+
+        cur_pos, cur_ori = self.get_ee_pose()
+
+        pos_error_world = target_pos - cur_pos
+        ori_error_world = orientation_error(target_ori_mat, cur_ori)
+
+        pos_error_base = self._world_pos_to_base_frame(cur_pos + pos_error_world) - \
+                         self._world_pos_to_base_frame(cur_pos)
+        ori_error_base = self._world_ori_error_to_base_frame(ori_error_world)
+
+        delta = np.concatenate([pos_error_base, ori_error_base])
+        norm_delta = np.clip(delta / self._output_max, -1.0, 1.0)
+
+        ad = self._zero_action_dict(base_mode=-1)
+        ad[self._arm] = norm_delta
+        self._step(ad)
+
+    def joint_positions_to_ee_pose(self, q):
+        """FK: given 7 joint positions, return (pos, ori_mat) of the EE.
+
+        Temporarily sets qpos, calls forward, reads site, restores state.
+        """
+        saved_qpos = self.sim.data.qpos.copy()
+        saved_qvel = self.sim.data.qvel.copy()
+
+        for i, idx in enumerate(self.robot._ref_joint_pos_indexes):
+            self.sim.data.qpos[idx] = q[i]
+        self.sim.forward()
+
+        pos = np.array(self.sim.data.site_xpos[self._eef_site_id]).copy()
+        ori = self.sim.data.site_xmat[self._eef_site_id].reshape(3, 3).copy()
+
+        self.sim.data.qpos[:] = saved_qpos
+        self.sim.data.qvel[:] = saved_qvel
+        self.sim.forward()
+
+        return pos, ori
 
     def move_ee_to_pose(self, target_pos, target_ori_mat):
         """Blocking loop: move the EE to a target world-frame pose.
@@ -344,6 +397,38 @@ class SimRobot:
     # Blocking base control
     # ------------------------------------------------------------------
 
+    def step_base_toward_pose(self, x, y, theta, num_steps=50):
+        """Multiple physics steps moving the base toward a target pose.
+
+        Non-blocking version of move_base_to_pose for streaming control.
+        Runs a batch of steps per call so the SDK's 10Hz loop
+        makes meaningful progress.
+        """
+        target_pos = np.array([x, y])
+        target_yaw = theta
+
+        for i in range(num_steps):
+            cur_pos, cur_yaw = self.get_base_pose()
+            pos_err = target_pos - cur_pos
+            yaw_err = self._angle_diff(target_yaw, cur_yaw)
+            err_mag = np.linalg.norm(pos_err)
+
+            if err_mag < BASE_POS_TOL and abs(yaw_err) < BASE_ORI_TOL:
+                break
+
+            cos_y, sin_y = np.cos(cur_yaw), np.sin(cur_yaw)
+            local_x = cos_y * pos_err[0] + sin_y * pos_err[1]
+            local_y = -sin_y * pos_err[0] + cos_y * pos_err[1]
+
+            base_action = np.clip(
+                np.array([-local_x, -local_y, yaw_err]) * 20.0,
+                -1.0, 1.0,
+            )
+
+            ad = self._zero_action_dict(base_mode=1)
+            ad["base"] = base_action
+            self._step(ad)
+
     def move_base_to_pose(self, x, y, theta):
         """Blocking loop: move the base to a target (x, y, theta) in world frame."""
         target_pos = np.array([x, y])
@@ -365,8 +450,9 @@ class SimRobot:
             local_y = -sin_y * pos_err[0] + cos_y * pos_err[1]
 
             # Normalise (base velocity controller, values in [-1, 1])
+            # Negate xy: robosuite base controller convention is inverted
             base_action = np.clip(
-                np.array([local_x, local_y, yaw_err]) * 5.0,  # proportional gain
+                np.array([-local_x, -local_y, yaw_err]) * 20.0,
                 -1.0, 1.0,
             )
 
