@@ -20,7 +20,7 @@ try:
 except ImportError:
     ws_connect = None
 
-from camera_server.protocol import CameraInfo, CameraStateMsg, DecodedFrame
+from sim_server.camera_server.protocol import CameraInfo, CameraStateMsg, DecodedFrame
 
 logger = logging.getLogger(__name__)
 

@@ -225,8 +225,8 @@ class SimServer:
         """Create the SimRobot instance."""
         _setup_paths()
 
-        from sim.sim_robot import SimRobot
-        from sim.scenes import SCENE_HOOKS
+        from sim_server.sim_robot import SimRobot
+        from sim_server.scenes import SCENE_HOOKS
 
         # Register custom env if needed
         hooks = SCENE_HOOKS.get(self.task)

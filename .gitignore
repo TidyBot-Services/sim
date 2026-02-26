@@ -11,4 +11,7 @@ robocasa/
 robosuite/
 agent_server/
 system_logger/
+franka_interact/
+gripper_server/
+logs/
 .claude/

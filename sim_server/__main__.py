@@ -1,8 +1,8 @@
-"""Entry point: python -m sim"""
+"""Entry point: python -m sim_server"""
 
 import argparse
 
-from sim.server import SimServer
+from sim_server.server import SimServer
 
 
 def main():
@@ -37,16 +37,16 @@ def main():
 
     # Register bridges
     if not args.no_base_bridge:
-        from sim.bridges.base import BaseBridge
+        from sim_server.bridges.base import BaseBridge
         server.add_bridge(BaseBridge(server))
     if not args.no_franka_bridge:
-        from sim.bridges.franka import FrankaBridge
+        from sim_server.bridges.franka import FrankaBridge
         server.add_bridge(FrankaBridge(server))
     if not args.no_gripper_bridge:
-        from sim.bridges.gripper import GripperBridge
+        from sim_server.bridges.gripper import GripperBridge
         server.add_bridge(GripperBridge(server))
     if not args.no_camera_bridge:
-        from sim.bridges.camera import CameraBridge
+        from sim_server.bridges.camera import CameraBridge
         server.add_bridge(CameraBridge(server))
 
     server.run()

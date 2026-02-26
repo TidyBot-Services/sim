@@ -1,16 +1,15 @@
 # TidyBot Sim Server
 
-Simulated TidyBot agent server — runs a MuJoCo-based kitchen environment with a web dashboard, robot SDK, and code execution sandbox.
+Simulated TidyBot environment — runs MuJoCo physics with protocol bridges that emulate real hardware servers, so the agent_server connects transparently.
 
 ## Prerequisites
 
 - Python 3.11+
-- macOS (MuJoCo rendering requires `mjpython` from the `mujoco` package for GUI mode)
+- macOS (MuJoCo rendering requires `mjpython` for GUI mode)
 
 ## Setup
 
 ```bash
-# Clone with submodules
 git clone https://github.com/TidyBot-Services/sim.git
 cd sim
 
@@ -18,153 +17,72 @@ cd sim
 python3 -m venv .venv
 source .venv/bin/activate
 
-# Install robosuite and robocasa (editable, pulls their own dependencies)
-pip install -e robosuite/
-pip install -e robocasa/
-
-# Install agent server dependencies
-pip install -r requirements.txt
-
-# Install TidyVerse robot into robosuite
+# Run setup (clones deps, installs packages, patches robosuite)
 ./setup.sh
 ```
 
-> **Note:** `setup.sh` initializes git submodules and runs `tidyverse/setup.py`, which copies the TidyVerse robot assets (meshes, XML, controllers) into robosuite and patches the registration files. It's safe to run multiple times.
-
-### RoboCasa assets
-
-RoboCasa downloads kitchen fixtures on first use. You can trigger this manually:
-
-```bash
-python -m robocasa.scripts.download_kitchen_assets
-```
+> **Note:** `setup.sh` clones robocasa/robosuite, checks for sibling agent_server/system_logger repos, installs Python packages, and runs `tidybot_assets/setup.py` to patch TidyVerse robot assets into robosuite.
 
 ## Running
 
-### Server + GUI (MuJoCo viewer window)
+### Sim server (MuJoCo + protocol bridges)
 
 ```bash
-mjpython -m agent_server.server
+mjpython -m sim_server
 ```
 
-Then open the dashboard at http://localhost:8080 and click **Server + GUI**.
+This starts:
+- MuJoCo physics loop on the main thread
+- Base bridge (RPC on port 50000)
+- Franka bridge (ZMQ on ports 5555-5557)
+- Gripper bridge (ZMQ on ports 5570-5571)
+- Camera bridge (WebSocket on port 5580)
 
-### Server only (headless)
+### Agent server (separate terminal)
 
 ```bash
-python -m agent_server.server
+cd agent_server && python3 server.py
 ```
 
-Open http://localhost:8080 and click **Server Only**. Camera views on the dashboard still work (rendered offscreen via `mujoco.Renderer`).
+The agent_server connects to the bridges and exposes the unified REST/WebSocket API on port 8080.
 
 ### CLI options
 
 ```bash
-mjpython -m agent_server.server \
-    --host 0.0.0.0 \
-    --port 8080 \
+mjpython -m sim_server \
     --task BananaTestKitchen \
     --robot TidyVerse \
     --layout 1 \
-    --style 1
+    --style 1 \
+    --no-gui            # headless mode
 ```
 
 ## Project Structure
 
 ```
-sim/
-├── agent_server/           # FastAPI server
-│   ├── server.py           # Main app, sim lifecycle, ZMQ bridge
+├── sim_server/             # MuJoCo sim server
+│   ├── __main__.py         # Entry point
+│   ├── server.py           # Physics loop + command queue
 │   ├── sim_robot.py        # SimRobot wrapper around robosuite env
-│   ├── code_executor.py    # Sandboxed Python code execution
-│   ├── lease.py            # Lease-based access control
-│   ├── config.py           # Server and control config
-│   ├── zmq_bridge.py       # Thread-safe sim access from executor
-│   ├── robot_sdk/          # TidyBot-compatible Python SDK
-│   │   ├── arm.py          # Arm control (IK, move_to_pose, go_home)
-│   │   ├── base.py         # Mobile base control
-│   │   ├── gripper.py      # Gripper open/close
-│   │   ├── sensors.py      # Camera frames, state queries
-│   │   └── yolo.py         # YOLO segmentation (remote server)
-│   └── routes/
-│       ├── dashboard.py    # Web dashboard (inline HTML)
-│       ├── state_routes.py # Camera MJPEG streams, robot state
-│       ├── code_routes.py  # Code execution API
-│       └── lease_routes.py # Lease management API
-├── tidyverse/              # TidyVerse robot definition
+│   ├── config.py           # Control tuning constants
+│   ├── scenes.py           # Custom scene registration
+│   ├── bridges/            # Protocol bridges
+│   │   ├── base.py         # multiprocessing.managers RPC (port 50000)
+│   │   ├── franka.py       # ZMQ CMD/STATE/STREAM (ports 5555-5557)
+│   │   ├── gripper.py      # ZMQ CMD/STATE (ports 5570-5571)
+│   │   └── camera.py       # WebSocket (port 5580)
+│   └── camera_server/      # Camera HTTP server + YOLO
+├── tidybot_assets/         # TidyVerse robot definition
 │   ├── assets/             # Meshes, XML, Python, controller config
 │   └── setup.py            # Installs robot into robosuite
-├── robocasa/               # Submodule → upstream robocasa/robocasa
-├── robosuite/              # Submodule → upstream ARISE-Initiative/robosuite
 ├── setup.sh                # One-command setup
-└── requirements.txt        # Agent server Python dependencies
+└── requirements.txt        # Python dependencies
 ```
 
-## API
-
-### Simulation control
-
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/api/start` | POST | Start simulation (`{"gui": true/false}`) |
-| `/api/stop` | POST | Stop simulation |
-| `/api/reset` | POST | Reset scene to initial state |
-| `/api/sim_status` | GET | Running status and uptime |
-
-### Robot state and cameras
-
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/api/state` | GET | Base pose, EE pose, gripper state |
-| `/api/camera/{name}` | GET | Single JPEG frame |
-| `/api/camera/{name}/stream` | GET | MJPEG stream (~20fps) |
-
-Camera names: `robot0_agentview_center`, `robot0_eye_in_hand`
-
-### Code execution (requires lease)
-
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/api/code/execute` | POST | Submit Python code |
-| `/api/code/status` | GET | Live stdout/stderr with offset polling |
-| `/api/code/result` | GET | Last execution result |
-| `/api/code/stop` | POST | Stop running code |
-| `/api/code/history` | GET | Execution history |
-
-### Lease management
-
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/api/lease/acquire` | POST | Acquire lease (`{"holder": "name"}`) |
-| `/api/lease/release` | POST | Release lease |
-| `/api/lease/status` | GET | Current lease info |
-
-## SDK Usage (via code execution)
-
-Acquire a lease, then submit code through the API:
-
-```python
-from robot_sdk import arm, base, gripper
-
-# Move arm
-arm.go_home()
-arm.move_to_pose([0.5, 0.0, 0.3], [0, 0, 0])
-
-# Gripper
-gripper.close()
-gripper.open()
-
-# Mobile base
-base.move_forward(0.3)
-base.rotate(1.57)
-```
-
-## Updating submodules
-
-To pull upstream changes from robocasa/robosuite:
+## Updating dependencies
 
 ```bash
 cd robocasa && git pull origin main && cd ..
 cd robosuite && git pull origin master && cd ..
-python tidyverse/setup.py   # re-patch after update
+python tidybot_assets/setup.py   # re-patch after update
 ```

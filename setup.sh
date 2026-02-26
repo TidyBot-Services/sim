@@ -54,8 +54,8 @@ pip install -e robocasa/
 pip install -r requirements.txt
 
 echo ""
-echo "=== Installing TidyVerse robot into robosuite ==="
-python3 tidyverse/setup.py
+echo "=== Installing TidyBot assets into robosuite ==="
+python3 tidybot_assets/setup.py
 
 echo ""
 read -p "Download RoboCasa kitchen assets (~10 GB)? Required for kitchen environments. [y/N] " dl_answer
@@ -70,4 +70,4 @@ fi
 
 echo ""
 echo "=== Done ==="
-echo "Start the sim server with: mjpython -m sim"
+echo "Start the sim server with: mjpython -m sim_server"

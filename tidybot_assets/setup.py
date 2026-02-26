@@ -2,7 +2,7 @@
 """Install TidyVerse robot into a vanilla robosuite checkout.
 
 Run from the repo root:
-    python tidyverse/setup.py
+    python tidybot_assets/setup.py
 
 Copies asset files and patches robosuite's registration modules so that
 ``TidyVerse`` is available as a robot name.  Safe to run multiple times

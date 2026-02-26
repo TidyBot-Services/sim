@@ -8,7 +8,7 @@ import robosuite.utils.transform_utils as T
 from robosuite.utils.control_utils import orientation_error
 from robosuite.controllers import load_composite_controller_config
 
-from sim.config import (
+from sim_server.config import (
     ARM_MAX_STEPS,
     ARM_ORI_TOL,
     ARM_OUTPUT_MAX_ORI,

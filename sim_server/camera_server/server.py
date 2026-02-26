@@ -13,8 +13,8 @@ import httpx
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import Response, StreamingResponse
 
-from camera_server.config import CameraServerConfig
-from camera_server.yolo_client import YOLOClient
+from sim_server.camera_server.config import CameraServerConfig
+from sim_server.camera_server.yolo_client import YOLOClient
 
 logger = logging.getLogger("camera_server")
 
