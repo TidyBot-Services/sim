@@ -180,9 +180,10 @@ class SimServer:
             self._state.ee_pos = ee_pos.tolist()
             self._state.ee_ori_mat = ee_ori.flatten().tolist()
             self._state.gripper_position = gripper["position"]
-            # Map gripper width to 0-85mm range (clamp to physical max)
+            # Map gripper width to 0-85mm range (Robotiq: 85mm=open, 0mm=closed)
+            # Robosuite qpos: ~0 when open, ~0.08 when closed — invert.
             gripper_width = robot.get_gripper_width()
-            self._state.gripper_position_mm = min(gripper_width * 85.0 / 0.08, 85.0)
+            self._state.gripper_position_mm = max(85.0 - gripper_width * 85.0 / 0.08, 0.0)
             self._state.gripper_closed = gripper["closed"]
             self._state.gripper_object_detected = False
             self._state.timestamp = time.time()

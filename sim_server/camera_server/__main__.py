@@ -4,8 +4,8 @@ import argparse
 
 import uvicorn
 
-from sim_server.camera_server.config import CameraServerConfig
-from sim_server.camera_server.server import app, configure
+from .config import CameraServerConfig
+from .server import app, configure
 
 
 def main():
