@@ -7,4 +7,6 @@ __pycache__/
 *.jpg
 MUJOCO_LOG.TXT
 TidyVerse-urdf-main/
+robocasa/
+robosuite/
 .claude/

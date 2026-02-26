@@ -6,6 +6,15 @@ echo "=== Initializing submodules ==="
 git submodule update --init --recursive
 
 echo ""
+echo "=== Cloning dependency repos ==="
+if [ ! -d "robosuite" ]; then
+    git clone https://github.com/ARISE-Initiative/robosuite.git
+fi
+if [ ! -d "robocasa" ]; then
+    git clone https://github.com/robocasa/robocasa.git
+fi
+
+echo ""
 echo "=== Installing native dependencies via conda ==="
 conda install -y -c conda-forge llvmlite numba
 
