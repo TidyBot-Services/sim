@@ -9,4 +9,6 @@ MUJOCO_LOG.TXT
 TidyVerse-urdf-main/
 robocasa/
 robosuite/
+agent_server/
+system_logger/
 .claude/

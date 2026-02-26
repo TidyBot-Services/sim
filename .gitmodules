@@ -1,6 +1,0 @@
-[submodule "agent_server"]
-	path = agent_server
-	url = https://github.com/TidyBot-Services/agent_server.git
-[submodule "system_logger"]
-	path = system_logger
-	url = https://github.com/TidyBot-Services/system_logger.git
