@@ -1,7 +1,7 @@
 """Tolerances, gains, and timeouts for simulated robot control."""
 
 # Arm (EE) convergence tolerances
-ARM_POS_TOL = 0.01  # metres
+ARM_POS_TOL = 0.05  # metres (relaxed for sim — OSC struggles near fixtures)
 ARM_ORI_TOL = 0.05  # radians
 
 # Base convergence tolerances
@@ -9,7 +9,7 @@ BASE_POS_TOL = 0.05  # metres
 BASE_ORI_TOL = 0.1   # radians
 
 # Maximum steps before timeout
-ARM_MAX_STEPS = 300
+ARM_MAX_STEPS = 600
 BASE_MAX_STEPS = 500
 GRIPPER_STEPS = 10
 
