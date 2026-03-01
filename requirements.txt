@@ -1,14 +1,13 @@
-# Agent server
-fastapi
-uvicorn
-pydantic
-pyzmq
+# Sim server + bridges
 mujoco>=3.3.0
-Pillow
 numpy
+Pillow
+pyzmq
+msgpack
+websockets
 
 # Camera server
 httpx
 
-# Robocasa & Robosuite (install via their setup.py, but these are the key deps)
+# Robocasa & Robosuite (installed editable by setup.sh)
 # pip install -e robosuite/ && pip install -e robocasa/

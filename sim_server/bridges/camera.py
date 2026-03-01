@@ -1,19 +1,33 @@
 """Camera bridge — exposes sim cameras via WebSocket server.
 
-Protocol: WebSocket on port 5580.
-  Client sends JSON actions (get_state, subscribe).
+Protocol: WebSocket on port 5580, matching camera_server protocol.
+  Client sends JSON with MessageType ints.
   Server streams binary frames: [4B header_len BE][JSON header][JPEG bytes].
+  State messages are JSON text with MessageType.STATE.
 """
 
 import asyncio
 import json
 import struct
+import sys
+import os
 import threading
 import time
 from math import tan, pi
 
 import websockets
 import websockets.asyncio.server
+
+# Import camera_server.protocol directly (avoid __init__.py which pulls in server.py)
+import importlib.util
+_proto_path = os.path.join(os.path.dirname(__file__), '..', '..', '..',
+                           'hardware', 'camera_server', 'camera_server', 'protocol.py')
+_spec = importlib.util.spec_from_file_location("_camera_protocol", os.path.abspath(_proto_path))
+_proto_mod = importlib.util.module_from_spec(_spec)
+sys.modules["_camera_protocol"] = _proto_mod  # required for dataclasses on Python 3.10
+_spec.loader.exec_module(_proto_mod)
+MessageType = _proto_mod.MessageType
+CameraFrame = _proto_mod.CameraFrame
 
 CAMERA_WS_PORT = 5580
 
@@ -71,31 +85,42 @@ class CameraBridge:
 
     async def _handle_client(self, ws):
         try:
+            # Send initial state on connect (camera client expects this)
+            await ws.send(self._build_state_json())
+
             async for raw in ws:
                 try:
-                    msg = json.loads(raw)
+                    if isinstance(raw, bytes):
+                        msg = json.loads(raw)
+                    else:
+                        msg = json.loads(raw)
                 except (json.JSONDecodeError, TypeError):
                     continue
 
-                action = msg.get("action", "")
+                msg_type = msg.get("type")
 
-                if action == "get_state":
-                    await ws.send(json.dumps(self._build_state_response()))
+                if msg_type == MessageType.GET_STATE:
+                    await ws.send(self._build_state_json())
 
-                elif action == "get_intrinsics":
+                elif msg_type == MessageType.GET_INTRINSICS:
                     device_id = msg.get("device_id")
-                    if not device_id:
-                        # Return first available camera's intrinsics
+                    if not device_id or device_id in ("any", "all"):
                         device_id = next(iter(SIM_CAMERAS), None)
                     intrinsics = self._get_intrinsics(device_id) if device_id else {}
                     await ws.send(json.dumps({
-                        "type": "intrinsics",
+                        "type": MessageType.INTRINSICS,
                         "data": intrinsics,
                     }))
 
-                elif action == "subscribe":
+                elif msg_type == MessageType.SUBSCRIBE:
                     fps = msg.get("fps", 15)
                     quality = msg.get("quality", 80)
+                    # Send ACK before starting stream
+                    await ws.send(json.dumps({
+                        "type": MessageType.ACK,
+                        "success": True,
+                        "message": "subscribed",
+                    }))
                     await self._stream_frames(ws, fps, quality)
 
         except websockets.ConnectionClosed:
@@ -123,22 +148,19 @@ class CameraBridge:
                     continue
 
                 meta = SIM_CAMERAS[cam_name]
-                header = {
-                    "type": "frame",
-                    "camera_id": cam_name,
-                    "camera_name": meta["name"],
-                    "stream": "color",
-                    "width": DEFAULT_WIDTH,
-                    "height": DEFAULT_HEIGHT,
-                    "timestamp": time.time(),
-                    "format": "jpeg",
-                    "intrinsics": self._get_intrinsics(cam_name),
-                }
-                header_bytes = json.dumps(header).encode("utf-8")
-                msg = struct.pack(">I", len(header_bytes)) + header_bytes + jpeg_bytes
+                # Use CameraFrame.pack() format for protocol compatibility
+                frame = CameraFrame(
+                    device_id=cam_name,
+                    stream_type="color",
+                    timestamp=time.time(),
+                    width=DEFAULT_WIDTH,
+                    height=DEFAULT_HEIGHT,
+                    format="jpeg",
+                    data=jpeg_bytes,
+                )
 
                 try:
-                    await ws.send(msg)
+                    await ws.send(frame.pack())
                 except websockets.ConnectionClosed:
                     return
 
@@ -177,21 +199,28 @@ class CameraBridge:
         except Exception:
             return {}
 
-    @staticmethod
-    def _build_state_response():
+    def _build_state_json(self):
+        """Build state JSON string matching CameraStateMsg.pack_json() format."""
         cameras = []
         for device_id, meta in SIM_CAMERAS.items():
             cameras.append({
                 "device_id": device_id,
                 "name": meta["name"],
-                "serial": meta["serial"],
-                "is_streaming": True,
-                "supported_streams": ["color"],
+                "camera_type": "sim",
+                "serial_number": meta["serial"],
+                "width": DEFAULT_WIDTH,
+                "height": DEFAULT_HEIGHT,
+                "fps": 30,
+                "streams": ["color"],
+                "firmware_version": "",
             })
-        return {
-            "type": "state",
+        return json.dumps({
+            "type": MessageType.STATE,
             "data": {
+                "timestamp": time.time(),
                 "cameras": cameras,
+                "active_streams": {},
                 "is_streaming": True,
+                "error": "",
             },
-        }
+        })

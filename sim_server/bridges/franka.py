@@ -239,8 +239,6 @@ class FrankaBridge:
             "timestamp": now,
             "robot_time": now,
             "elbow": [0.0, 1.0],
-            "gripper_width": state.gripper_position,
-            "gripper_is_grasped": state.gripper_closed,
         }
 
     @staticmethod

@@ -1,15 +1,36 @@
 """Gripper bridge — exposes Robotiq-compatible gripper control via ZMQ.
 
-Protocol: 2 ZMQ sockets, JSON serialization.
-  CMD  REP  port 5570  — JSON RPC commands
+Protocol: 2 ZMQ sockets, msgpack serialization (matches gripper_server).
+  CMD  REP  port 5570  — msgpack commands
   STATE PUB port 5571  — state broadcast at ~10Hz
 """
 
-import json
+import sys
+import os
 import threading
 import time
 
+import msgpack
 import zmq
+
+# Import gripper_server.protocol directly (avoid __init__.py which pulls in client/server)
+import importlib.util
+_proto_path = os.path.join(os.path.dirname(__file__), '..', '..', '..',
+                           'hardware', 'gripper_server', 'gripper_server', 'protocol.py')
+_spec = importlib.util.spec_from_file_location("_gripper_protocol", os.path.abspath(_proto_path))
+_proto_mod = importlib.util.module_from_spec(_spec)
+sys.modules["_gripper_protocol"] = _proto_mod  # required for dataclasses on Python 3.10
+_spec.loader.exec_module(_proto_mod)
+GripperStateMsg = _proto_mod.GripperStateMsg
+MessageType = _proto_mod.MessageType
+Response = _proto_mod.Response
+unpack_command = _proto_mod.unpack_command
+ActivateCmd = _proto_mod.ActivateCmd
+OpenCmd = _proto_mod.OpenCmd
+CloseCmd = _proto_mod.CloseCmd
+MoveCmd = _proto_mod.MoveCmd
+StopCmd = _proto_mod.StopCmd
+CalibrateCmd = _proto_mod.CalibrateCmd
 
 GRIPPER_CMD_PORT = 5570
 GRIPPER_STATE_PORT = 5571
@@ -44,7 +65,7 @@ class GripperBridge:
         print("[gripper-bridge] Stopped")
 
     # ------------------------------------------------------------------
-    # State publisher (PUB socket, ~10Hz)
+    # State publisher (PUB socket, ~10Hz, msgpack)
     # ------------------------------------------------------------------
 
     def _state_publisher(self):
@@ -57,14 +78,14 @@ class GripperBridge:
         while self._running:
             state = self._server.get_state()
             msg = self._build_state_msg(state)
-            sock.send_string(json.dumps(msg))
+            sock.send(msg.pack())
             time.sleep(interval)
 
         sock.close()
         ctx.term()
 
     # ------------------------------------------------------------------
-    # Command handler (REP socket)
+    # Command handler (REP socket, msgpack)
     # ------------------------------------------------------------------
 
     def _command_handler(self):
@@ -75,57 +96,54 @@ class GripperBridge:
 
         while self._running:
             try:
-                raw = sock.recv_string()
+                raw = sock.recv()
             except zmq.Again:
                 continue
 
             try:
-                req = json.loads(raw)
-                result, error = self._dispatch(req)
-                resp = {"result": result, "error": error}
+                cmd = unpack_command(raw)
+                resp = self._dispatch(cmd)
             except Exception as e:
-                resp = {"result": None, "error": str(e)}
+                resp = Response(success=False, message=str(e))
 
-            sock.send_string(json.dumps(resp))
+            sock.send(resp.pack())
 
         sock.close()
         ctx.term()
 
-    def _dispatch(self, req):
-        method = req.get("method", "")
-        args = req.get("args", [])
-        kwargs = req.get("kwargs", {})
+    def _dispatch(self, cmd):
+        if isinstance(cmd, ActivateCmd):
+            return Response(success=True, message="activated")
 
-        if method == "activate":
-            return True, None
-        elif method == "open":
+        elif isinstance(cmd, OpenCmd):
             self._server.submit_command("gripper_open")
             state = self._server.get_state()
             pos = self._mm_to_robotiq_pos(state.gripper_position_mm)
-            return [pos, False], None
-        elif method == "close":
+            return Response(success=True, data={"position": pos, "object_detected": False})
+
+        elif isinstance(cmd, CloseCmd):
             self._server.submit_command("gripper_close")
             state = self._server.get_state()
             pos = self._mm_to_robotiq_pos(state.gripper_position_mm)
-            return [pos, state.gripper_object_detected], None
-        elif method == "grasp":
-            result = self._server.submit_command("gripper_grasp")
-            return result, None
-        elif method == "move":
-            position = kwargs.get("position", args[0] if args else 128)
-            if position < 128:
+            return Response(success=True, data={"position": pos, "object_detected": state.gripper_object_detected})
+
+        elif isinstance(cmd, MoveCmd):
+            if cmd.position < 128:
                 self._server.submit_command("gripper_open")
             else:
                 self._server.submit_command("gripper_close")
             state = self._server.get_state()
             pos = self._mm_to_robotiq_pos(state.gripper_position_mm)
-            return [pos, state.gripper_object_detected], None
-        elif method == "stop":
-            return True, None
-        elif method == "calibrate":
-            return True, None
+            return Response(success=True, data={"position": pos, "object_detected": state.gripper_object_detected})
+
+        elif isinstance(cmd, StopCmd):
+            return Response(success=True, message="stopped")
+
+        elif isinstance(cmd, CalibrateCmd):
+            return Response(success=True, message="calibrated")
+
         else:
-            return None, f"unknown method: {method}"
+            return Response(success=False, message=f"unknown command: {type(cmd).__name__}")
 
     # ------------------------------------------------------------------
     # Helpers
@@ -140,15 +158,16 @@ class GripperBridge:
     def _build_state_msg(state):
         position_mm = state.gripper_position_mm
         position = int(255 * (1.0 - min(position_mm / 85.0, 1.0)))
-        return {
-            "position": position,
-            "position_mm": position_mm,
-            "is_activated": True,
-            "is_moving": False,
-            "object_detected": state.gripper_object_detected,
-            "is_calibrated": True,
-            "current": 0,
-            "current_ma": 0.0,
-            "fault_code": 0,
-            "fault_message": "",
-        }
+        return GripperStateMsg(
+            timestamp=time.time(),
+            position=position,
+            position_mm=position_mm,
+            is_activated=True,
+            is_moving=False,
+            object_detected=state.gripper_object_detected,
+            is_calibrated=True,
+            current=0,
+            current_ma=0.0,
+            fault_code=0,
+            fault_message="",
+        )
