@@ -162,7 +162,7 @@ class SimServer:
             return
 
         base_pos, base_yaw = robot.get_base_pose()
-        ee_pos, ee_ori = robot.get_ee_pose()
+        ee_pos, ee_ori = robot.get_ee_pose_in_base_frame()
         joints = robot.get_arm_joints()
         joint_vels = robot.get_arm_velocities()
         gripper = robot.get_gripper_state()
@@ -221,6 +221,7 @@ class SimServer:
         robot._last_obs, _, _, _ = robot.env.step(action)
         if robot.env.has_renderer:
             robot.env.render()
+            robot._maybe_apply_pending_cam()
 
     def _init_sim(self):
         """Create the SimRobot instance."""
@@ -285,7 +286,14 @@ class SimServer:
         # Start protocol bridges
         self.start_bridges()
 
-        print("[sim] Entering physics loop (Ctrl+C to stop)")
+        # SIGUSR1 saves the current viewer camera position
+        import signal
+        def _save_cam(signum, frame):
+            if self._sim_robot is not None:
+                self._sim_robot.save_viewer_cam()
+        signal.signal(signal.SIGUSR1, _save_cam)
+
+        print("[sim] Entering physics loop (Ctrl+C to stop, kill -USR1 to save camera)")
         step_interval = 1.0 / 20  # ~20 Hz idle stepping
 
         try:

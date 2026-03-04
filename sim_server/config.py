@@ -18,4 +18,4 @@ CONTROL_FREQ = 20
 
 # OSC output ranges (from default_pandaomron.json)
 ARM_OUTPUT_MAX_POS = 0.05   # metres per step
-ARM_OUTPUT_MAX_ORI = 0.5    # radians per step
+ARM_OUTPUT_MAX_ORI = 0.2    # radians per step (reduced to prevent orientation overshoot)

@@ -1,6 +1,9 @@
 """SimRobot — wraps a robosuite PandaOmron environment and exposes
 blocking high-level control methods consumed by the robot_sdk modules."""
 
+import json
+import os
+
 import numpy as np
 import robocasa  # noqa: F401 — registers Kitchen env with robosuite
 import robosuite
@@ -20,6 +23,18 @@ from sim_server.config import (
     CONTROL_FREQ,
     GRIPPER_STEPS,
 )
+
+
+# Constant correction rotation: Rz(+90°) aligns MuJoCo EE site frame
+# with real Franka O_T_EE convention (DH-based forward kinematics).
+# Without this, EE X/Y axes are swapped between sim and real robot,
+# causing dpitch/droll/dyaw to rotate around wrong physical axes.
+_EE_FRAME_CORRECTION = np.array([
+    [0.0, -1.0, 0.0],
+    [1.0,  0.0, 0.0],
+    [0.0,  0.0, 1.0],
+])  # Rz(+90°)
+_EE_FRAME_CORRECTION_INV = _EE_FRAME_CORRECTION.T  # Rz(-90°)
 
 
 class SimRobot:
@@ -75,12 +90,15 @@ class SimRobot:
         self._base_site_name = self.robot.robot_model.base.correct_naming("center")
         self._base_site_id = self.sim.model.site_name2id(self._base_site_name)
 
-        # Cache initial joint configuration — the sim's natural starting state.
-        # The franka bridge remaps joints so the SDK sees its HOME_POSITION
-        # when the sim is at init_qpos. This offset makes "go home" = "go to start".
-        self._home_qpos = self.robot.robot_model.init_qpos.copy()
+        # Move arm to real-robot home joints so EE frame convention matches.
+        # robosuite's init_qpos differs from the real Franka home, which would
+        # cause EE-frame operations (dpitch, etc.) to rotate around wrong axes.
         SDK_HOME = np.array([0.0, -0.785, 0.0, -2.356, 0.0, 1.913, 0.785])
-        self._joint_offset = SDK_HOME - self._home_qpos  # add to sim → SDK space
+        for i, idx in enumerate(self.robot._ref_joint_pos_indexes):
+            self.sim.data.qpos[idx] = SDK_HOME[i]
+        self.sim.forward()
+        self._home_qpos = SDK_HOME.copy()
+        self._joint_offset = np.zeros(7)  # no offset needed — sim matches real
 
         # OSC output maxima — used to normalise delta commands to [-1, 1]
         self._output_max = np.array([
@@ -88,9 +106,63 @@ class SimRobot:
             ARM_OUTPUT_MAX_ORI, ARM_OUTPUT_MAX_ORI, ARM_OUTPUT_MAX_ORI,
         ])
 
+        # Load saved viewer camera if available (must be before gripper_open
+        # which calls _step → _maybe_apply_pending_cam)
+        self._viewer_cam_path = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), "viewer_cam.json"
+        )
+        self._apply_saved_viewer_cam()
+
         # Open the gripper at start (matches go_home behaviour)
         self._gripper_closed = False
         self.gripper_open()
+
+    def _apply_saved_viewer_cam(self):
+        """Load saved viewer camera config to apply on first render."""
+        self._pending_viewer_cam = None
+        if not os.path.isfile(self._viewer_cam_path):
+            return
+        try:
+            with open(self._viewer_cam_path) as f:
+                self._pending_viewer_cam = json.load(f)
+            print(f"[sim] Will apply saved viewer camera on first render")
+        except Exception as e:
+            print(f"[sim] Failed to load viewer camera: {e}")
+
+    def _maybe_apply_pending_cam(self):
+        """Apply pending camera config to the viewer if it exists."""
+        if self._pending_viewer_cam is None:
+            return
+        viewer = getattr(self.env, "viewer", None)
+        if viewer is None or viewer.viewer is None:
+            return
+        v = viewer.viewer
+        cfg = self._pending_viewer_cam
+        v.cam.lookat = cfg["lookat"]
+        v.cam.distance = cfg["distance"]
+        v.cam.azimuth = cfg["azimuth"]
+        v.cam.elevation = cfg["elevation"]
+        print(f"[sim] Applied saved viewer camera")
+        self._pending_viewer_cam = None  # only apply once
+
+    def save_viewer_cam(self):
+        """Save current viewer camera position to disk."""
+        viewer = getattr(self.env, "viewer", None)
+        if viewer is None:
+            return {"error": "no viewer"}
+        v = viewer.viewer
+        if v is None:
+            return {"error": "viewer not initialized"}
+        cam_cfg = {
+            "lookat": list(float(x) for x in v.cam.lookat),
+            "distance": float(v.cam.distance),
+            "azimuth": float(v.cam.azimuth),
+            "elevation": float(v.cam.elevation),
+        }
+        with open(self._viewer_cam_path, "w") as f:
+            json.dump(cam_cfg, f, indent=2)
+        print(f"[sim] Saved viewer camera to {self._viewer_cam_path}")
+        return cam_cfg
 
     def _fix_tidyverse_cameras(self):
         """Reposition cameras for TidyVerse robot geometry.
@@ -142,6 +214,7 @@ class SimRobot:
         self._last_obs, _, _, _ = self.env.step(action)
         if self.env.has_renderer:
             self.env.render()
+            self._maybe_apply_pending_cam()
         return self._last_obs
 
     def _zero_action_dict(self, base_mode=-1):
@@ -163,6 +236,27 @@ class SimRobot:
         pos = np.array(self.sim.data.site_xpos[self._eef_site_id]).copy()
         ori = self.sim.data.site_xmat[self._eef_site_id].reshape(3, 3).copy()
         return pos, ori
+
+    def get_ee_pose_in_base_frame(self):
+        """Return (pos[3], ori_mat[3,3]) of the EE in the robot base frame.
+
+        Matches the real Franka's O_T_EE convention where O = base origin.
+        """
+        T_wb = self._get_base_transform()
+        T_bw = T.pose_inv(T_wb)
+
+        ee_pos_world = np.array(self.sim.data.site_xpos[self._eef_site_id])
+        ee_ori_world = self.sim.data.site_xmat[self._eef_site_id].reshape(3, 3)
+
+        # Build world-frame EE transform
+        T_we = np.eye(4)
+        T_we[:3, :3] = ee_ori_world
+        T_we[:3, 3] = ee_pos_world
+
+        # EE in base frame, with Rz(+90°) correction to match real Franka
+        T_be = T_bw @ T_we
+        R_corrected = T_be[:3, :3] @ _EE_FRAME_CORRECTION
+        return T_be[:3, 3].copy(), R_corrected.copy()
 
     def get_arm_joints(self):
         """Return the 7-DOF arm joint positions."""
@@ -319,17 +413,27 @@ class SimRobot:
     # ------------------------------------------------------------------
 
     def track_ee_pose_step(self, target_pos, target_ori_mat):
-        """One physics step tracking a target EE pose (for streaming control).
+        """One physics step tracking a target EE pose in base frame.
 
-        Same delta computation as move_ee_to_pose, but only ONE step.
+        Targets are in the robot's base frame (matching real Franka O_T_EE).
+        Converts to world frame internally for error computation, then sends
+        base-frame deltas to the OSC controller.
         """
         target_pos = np.asarray(target_pos).flatten()[:3]
         target_ori_mat = np.asarray(target_ori_mat).reshape(3, 3)
 
+        # Undo EE frame correction: Franka convention → MuJoCo site frame
+        target_ori_mj = target_ori_mat @ _EE_FRAME_CORRECTION_INV
+
+        # Convert base-frame target to world frame
+        T_wb = self._get_base_transform()
+        target_world_pos = T_wb[:3, :3] @ target_pos + T_wb[:3, 3]
+        target_world_ori = T_wb[:3, :3] @ target_ori_mj
+
         cur_pos, cur_ori = self.get_ee_pose()
 
-        pos_error_world = target_pos - cur_pos
-        ori_error_world = orientation_error(target_ori_mat, cur_ori)
+        pos_error_world = target_world_pos - cur_pos
+        ori_error_world = orientation_error(target_world_ori, cur_ori)
 
         pos_error_base = self._world_pos_to_base_frame(cur_pos + pos_error_world) - \
                          self._world_pos_to_base_frame(cur_pos)
@@ -343,9 +447,10 @@ class SimRobot:
         self._step(ad)
 
     def joint_positions_to_ee_pose(self, q):
-        """FK: given 7 joint positions, return (pos, ori_mat) of the EE.
+        """FK: given 7 joint positions, return (pos, ori_mat) of the EE in base frame.
 
         Temporarily sets qpos, calls forward, reads site, restores state.
+        Returns base-frame pose to match the real Franka O_T_EE convention.
         """
         saved_qpos = self.sim.data.qpos.copy()
         saved_qvel = self.sim.data.qvel.copy()
@@ -354,8 +459,19 @@ class SimRobot:
             self.sim.data.qpos[idx] = q[i]
         self.sim.forward()
 
-        pos = np.array(self.sim.data.site_xpos[self._eef_site_id]).copy()
-        ori = self.sim.data.site_xmat[self._eef_site_id].reshape(3, 3).copy()
+        ee_pos_world = np.array(self.sim.data.site_xpos[self._eef_site_id])
+        ee_ori_world = self.sim.data.site_xmat[self._eef_site_id].reshape(3, 3)
+
+        # Convert to base frame
+        T_wb = self._get_base_transform()
+        T_bw = T.pose_inv(T_wb)
+        T_we = np.eye(4)
+        T_we[:3, :3] = ee_ori_world
+        T_we[:3, 3] = ee_pos_world
+        T_be = T_bw @ T_we
+
+        pos = T_be[:3, 3].copy()
+        ori = (T_be[:3, :3] @ _EE_FRAME_CORRECTION).copy()
 
         self.sim.data.qpos[:] = saved_qpos
         self.sim.data.qvel[:] = saved_qvel
@@ -397,14 +513,45 @@ class SimRobot:
             ad[self._arm] = norm_delta
             self._step(ad)
 
-    def move_ee_delta(self, dx=0.0, dy=0.0, dz=0.0, droll=0.0, dpitch=0.0, dyaw=0.0):
-        """Move the EE by a delta from its current world-frame pose."""
+    def move_ee_delta(self, dx=0.0, dy=0.0, dz=0.0, droll=0.0, dpitch=0.0, dyaw=0.0, frame="base"):
+        """Move the EE by a delta in the specified frame.
+
+        Args:
+            dx, dy, dz: Position delta in metres.
+            droll, dpitch, dyaw: Orientation delta in radians (applied as RPY).
+            frame: "base" (robot base frame) or "ee" (end-effector frame).
+        """
+        if frame not in ("base", "ee"):
+            raise ValueError(f"Invalid frame: {frame!r}. Must be 'base' or 'ee'")
+
         cur_pos, cur_ori = self.get_ee_pose()
-        target_pos = cur_pos + np.array([dx, dy, dz])
+        delta_pos = np.array([dx, dy, dz])
+
+        if frame == "base":
+            # Delta is in base frame — rotate to world frame
+            T_wb = self._get_base_transform()
+            R_wb = T_wb[:3, :3]
+            world_delta = R_wb @ delta_pos
+        else:  # frame == "ee"
+            # Delta is in EE frame — rotate to world frame
+            world_delta = cur_ori @ delta_pos
+
+        target_pos = cur_pos + world_delta
 
         # Compose orientation delta
-        delta_ori = T.euler2mat(np.array([droll, dpitch, dyaw]))
-        target_ori = delta_ori @ cur_ori
+        if droll != 0.0 or dpitch != 0.0 or dyaw != 0.0:
+            delta_rot = T.euler2mat(np.array([droll, dpitch, dyaw]))
+            if frame == "ee":
+                # R_target = R_current @ R_delta
+                target_ori = cur_ori @ delta_rot
+            else:
+                # R_target = R_base_world @ R_delta @ R_base_world^T @ R_current
+                # i.e. rotate the EE around base-frame axes
+                T_wb = self._get_base_transform()
+                R_wb = T_wb[:3, :3]
+                target_ori = R_wb @ delta_rot @ R_wb.T @ cur_ori
+        else:
+            target_ori = cur_ori
 
         self.move_ee_to_pose(target_pos, target_ori)
 

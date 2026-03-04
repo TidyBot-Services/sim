@@ -9,8 +9,6 @@ Protocol: WebSocket on port 5580, matching camera_server protocol.
 import asyncio
 import json
 import struct
-import sys
-import os
 import threading
 import time
 from math import tan, pi
@@ -18,16 +16,45 @@ from math import tan, pi
 import websockets
 import websockets.asyncio.server
 
-# Import camera_server.protocol directly (avoid __init__.py which pulls in server.py)
-import importlib.util
-_proto_path = os.path.join(os.path.dirname(__file__), '..', '..', '..',
-                           'hardware', 'camera_server', 'camera_server', 'protocol.py')
-_spec = importlib.util.spec_from_file_location("_camera_protocol", os.path.abspath(_proto_path))
-_proto_mod = importlib.util.module_from_spec(_spec)
-sys.modules["_camera_protocol"] = _proto_mod  # required for dataclasses on Python 3.10
-_spec.loader.exec_module(_proto_mod)
-MessageType = _proto_mod.MessageType
-CameraFrame = _proto_mod.CameraFrame
+
+# ---------------------------------------------------------------------------
+# Inline protocol definitions (matches camera_server protocol, no external dep)
+# ---------------------------------------------------------------------------
+
+class MessageType:
+    GET_STATE = 1
+    STATE = 2
+    SUBSCRIBE = 3
+    UNSUBSCRIBE = 4
+    ACK = 5
+    ERROR = 6
+    GET_INTRINSICS = 7
+    INTRINSICS = 8
+
+
+class CameraFrame:
+    """Binary-framed camera data: [4B header_len BE][JSON header][image bytes]."""
+
+    def __init__(self, device_id, stream_type, timestamp, width, height, format, data):
+        self.device_id = device_id
+        self.stream_type = stream_type
+        self.timestamp = timestamp
+        self.width = width
+        self.height = height
+        self.format = format
+        self.data = data  # raw image bytes (JPEG/PNG)
+
+    def pack(self) -> bytes:
+        header = json.dumps({
+            "type": "frame",
+            "camera_id": self.device_id,
+            "stream": self.stream_type,
+            "width": self.width,
+            "height": self.height,
+            "timestamp": self.timestamp,
+            "format": self.format,
+        }).encode("utf-8")
+        return struct.pack(">I", len(header)) + header + self.data
 
 CAMERA_WS_PORT = 5580
 
@@ -97,12 +124,15 @@ class CameraBridge:
                 except (json.JSONDecodeError, TypeError):
                     continue
 
+                # Support both integer "type" (protocol spec) and
+                # string "action" (camera_server client convention)
                 msg_type = msg.get("type")
+                action = msg.get("action", "")
 
-                if msg_type == MessageType.GET_STATE:
+                if msg_type == MessageType.GET_STATE or action == "get_state":
                     await ws.send(self._build_state_json())
 
-                elif msg_type == MessageType.GET_INTRINSICS:
+                elif msg_type == MessageType.GET_INTRINSICS or action == "get_intrinsics":
                     device_id = msg.get("device_id")
                     if not device_id or device_id in ("any", "all"):
                         device_id = next(iter(SIM_CAMERAS), None)
@@ -112,7 +142,7 @@ class CameraBridge:
                         "data": intrinsics,
                     }))
 
-                elif msg_type == MessageType.SUBSCRIBE:
+                elif msg_type == MessageType.SUBSCRIBE or action == "subscribe":
                     fps = msg.get("fps", 15)
                     quality = msg.get("quality", 80)
                     # Send ACK before starting stream
