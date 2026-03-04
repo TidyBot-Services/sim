@@ -248,6 +248,45 @@ class SimRobot:
         Image.fromarray(frame).save(buf, format="JPEG", quality=quality)
         return buf.getvalue()
 
+    def render_camera_depth(self, name="robot0_agentview_center", width=256, height=256):
+        """Render a depth frame from the named camera as 16-bit PNG bytes (mm)."""
+        import mujoco
+        import cv2
+
+        model = self.sim.model._model
+        data = self.sim.data._data
+
+        if not hasattr(self, '_depth_renderers'):
+            self._depth_renderers = {}
+
+        key = (name, width, height)
+        if key not in self._depth_renderers:
+            self._depth_renderers[key] = mujoco.Renderer(model, height, width)
+            self._depth_renderers[key].enable_depth_rendering()
+
+        renderer = self._depth_renderers[key]
+        opt = mujoco.MjvOption()
+        opt.geomgroup[0] = False       # hide collision geoms
+        opt.sitegroup[:] = [False] * 6  # hide sites
+
+        renderer.update_scene(data, camera=name, scene_option=opt)
+        depth_buf = renderer.render().copy()  # float32, normalized [0, 1]
+
+        # Convert from normalized depth to linear meters using znear/zfar
+        cam_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_CAMERA, name)
+        extent = model.stat.extent
+        znear = model.vis.map.znear * extent
+        zfar = model.vis.map.zfar * extent
+        # Linearize: depth_linear = znear * zfar / (zfar - depth_buf * (zfar - znear))
+        depth_linear = znear * zfar / (zfar - depth_buf * (zfar - znear))
+        # Clamp to zfar (background)
+        depth_linear[depth_buf >= 1.0] = 0  # 0 = invalid/no return
+
+        # Convert to uint16 millimeters for PNG encoding
+        depth_mm = (depth_linear * 1000).astype(np.uint16)
+        _, png_buf = cv2.imencode(".png", depth_mm)
+        return png_buf.tobytes()
+
     # ------------------------------------------------------------------
     # Coordinate frame helpers
     # ------------------------------------------------------------------

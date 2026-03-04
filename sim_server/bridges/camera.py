@@ -164,6 +164,39 @@ class CameraBridge:
                 except websockets.ConnectionClosed:
                     return
 
+                # Stream depth frame for the same camera
+                try:
+                    depth_bytes = await self._loop.run_in_executor(
+                        None,
+                        self._server.submit_command,
+                        "render_camera_depth",
+                        cam_name,
+                        DEFAULT_WIDTH,
+                        DEFAULT_HEIGHT,
+                    )
+                except Exception:
+                    depth_bytes = None
+
+                if depth_bytes is not None:
+                    depth_header = {
+                        "type": "frame",
+                        "camera_id": cam_name,
+                        "camera_name": meta["name"],
+                        "stream": "depth",
+                        "width": DEFAULT_WIDTH,
+                        "height": DEFAULT_HEIGHT,
+                        "timestamp": time.time(),
+                        "format": "png",
+                        "intrinsics": self._get_intrinsics(cam_name),
+                    }
+                    depth_header_bytes = json.dumps(depth_header).encode("utf-8")
+                    depth_msg = struct.pack(">I", len(depth_header_bytes)) + depth_header_bytes + depth_bytes
+
+                    try:
+                        await ws.send(depth_msg)
+                    except websockets.ConnectionClosed:
+                        return
+
             elapsed = time.monotonic() - t0
             sleep_time = interval - elapsed
             if sleep_time > 0:
@@ -193,6 +226,7 @@ class CameraBridge:
                 "ppx": ppx, "ppy": ppy,
                 "width": DEFAULT_WIDTH,
                 "height": DEFAULT_HEIGHT,
+                "depth_scale": 0.001,
             }
             self._intrinsics[cam_name] = intrinsics
             return intrinsics
@@ -211,7 +245,7 @@ class CameraBridge:
                 "width": DEFAULT_WIDTH,
                 "height": DEFAULT_HEIGHT,
                 "fps": 30,
-                "streams": ["color"],
+                "streams": ["color", "depth"],
                 "firmware_version": "",
             })
         return json.dumps({
