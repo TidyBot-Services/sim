@@ -21,10 +21,16 @@ MARKER = "# --- TidyVerse ---"
 
 
 def _copy(src, dst):
-    """Copy file or directory, skip if destination already exists."""
+    """Copy file or directory, overwriting if source is newer."""
     if os.path.exists(dst):
-        print(f"  skip (exists): {os.path.relpath(dst, REPO_ROOT)}")
-        return
+        if os.path.isdir(src):
+            # For directories, always refresh (copytree with dirs_exist_ok)
+            shutil.copytree(src, dst, dirs_exist_ok=True)
+            print(f"  update: {os.path.relpath(dst, REPO_ROOT)}")
+            return
+        elif os.path.getmtime(src) <= os.path.getmtime(dst):
+            print(f"  skip (up to date): {os.path.relpath(dst, REPO_ROOT)}")
+            return
     os.makedirs(os.path.dirname(dst), exist_ok=True)
     if os.path.isdir(src):
         shutil.copytree(src, dst)
