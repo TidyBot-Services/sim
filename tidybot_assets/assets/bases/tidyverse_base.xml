@@ -10,16 +10,20 @@
     </actuator>
     <worldbody>
         <body name="base" pos="0 0 0">
+            <!-- "center" site at the geometric center of the base footprint
+                 (used by get_base_pose for odometry). -->
+            <site name="center" type="sphere" pos="0.237 0.254 0" size="0.01" group="1" rgba="0 0 0 0"/>
+
             <body name="support" pos="0.435 0.254 0.47225">
                 <!-- arm mounts here; mesh is in panda_link0 frame per URDF -->
-                <site name="center" type="sphere" pos="0 0 0" size="0.01" group="1" rgba="0 0 0 0"/>
                 <geom type="mesh" mesh="tidyverse_base_vis" group="1" conaffinity="0" contype="0" rgba="0.7 0.7 0.7 1"/>
                 <geom type="mesh" mesh="tidyverse_base_col" group="0" name="base_col" density="10"/>
             </body>
 
             <joint name="joint_mobile_forward" pos="0 0 0" axis="1 0 0" type="slide" limited="false" damping="0" armature="0.0" frictionloss="250"/>
             <joint name="joint_mobile_side" pos="0 0 0" axis="0 1 0" type="slide" limited="false" damping="0" armature="0.0" frictionloss="250"/>
-            <joint name="joint_mobile_yaw" pos="0 0 0" axis="0 0 1" type="hinge" limited="false" damping="0" armature="0.0" frictionloss="250"/>
+            <!-- Yaw pivot at geometric center of the base footprint -->
+            <joint name="joint_mobile_yaw" pos="0.237 0.254 0" axis="0 0 1" type="hinge" limited="false" damping="0" armature="0.0" frictionloss="250"/>
         </body>
     </worldbody>
 </mujoco>
