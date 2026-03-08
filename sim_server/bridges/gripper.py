@@ -1,14 +1,15 @@
 """Gripper bridge — exposes Robotiq-compatible gripper control via ZMQ.
 
-Protocol: 2 ZMQ sockets, JSON serialization (matches gripper_server client).
-  CMD   REP  port 5570  — JSON RPC commands
-  STATE PUB  port 5571  — JSON state broadcast at ~10Hz
+Protocol: 2 ZMQ sockets, msgpack serialization (matches hardware gripper_server client).
+  CMD   REP  port 5570  — msgpack binary commands + responses
+  STATE PUB  port 5571  — msgpack state broadcast at ~10Hz
 """
 
 import json
 import threading
 import time
 
+import msgpack
 import zmq
 
 GRIPPER_CMD_PORT = 5570
@@ -57,7 +58,7 @@ class GripperBridge:
         while self._running:
             state = self._server.get_state()
             msg = self._build_state_dict(state)
-            sock.send_string(json.dumps(msg))
+            sock.send(msgpack.packb(msg, use_bin_type=True))
             time.sleep(interval)
 
         sock.close()
@@ -75,63 +76,66 @@ class GripperBridge:
 
         while self._running:
             try:
-                raw = sock.recv_string()
+                raw = sock.recv()
             except zmq.Again:
                 continue
 
             try:
-                req = json.loads(raw)
+                req = msgpack.unpackb(raw, raw=False)
                 resp = self._dispatch_rpc(req)
             except Exception as e:
                 resp = {"error": str(e)}
 
-            sock.send_string(json.dumps(resp))
+            sock.send(msgpack.packb(resp, use_bin_type=True))
 
         sock.close()
         ctx.term()
 
     def _dispatch_rpc(self, req):
-        method = req.get("method", "")
-        kwargs = req.get("kwargs", {})
+        # Hardware gripper client sends msgpack with msg_type integers:
+        # ACTIVATE=10, RESET=11, MOVE=12, OPEN=13, CLOSE=14, STOP=15, CALIBRATE=16
+        # Response format: {msg_type: 100, success: bool, message: str, data: dict|None}
+        msg_type = req.get("msg_type")
 
-        if method == "activate":
-            return {"result": True}
+        def _ok(data=None):
+            return {"msg_type": 100, "success": True, "message": "", "data": data}
 
-        elif method == "open":
+        if msg_type == 10:  # ACTIVATE
+            return _ok({"result": True})
+
+        elif msg_type == 13:  # OPEN
             self._server.submit_command("gripper_open")
             state = self._server.get_state()
             pos = self._mm_to_robotiq_pos(state.gripper_position_mm)
-            return {"result": [pos, False]}
+            return _ok({"position": pos, "object_detected": False})
 
-        elif method == "close":
+        elif msg_type == 14:  # CLOSE
             self._server.submit_command("gripper_close")
             state = self._server.get_state()
             pos = self._mm_to_robotiq_pos(state.gripper_position_mm)
-            return {"result": [pos, state.gripper_object_detected]}
+            return _ok({"position": pos, "object_detected": state.gripper_object_detected})
 
-        elif method == "move":
-            position = kwargs.get("position", 0)
+        elif msg_type == 12:  # MOVE
+            position = req.get("position", 0)
             if position < 128:
                 self._server.submit_command("gripper_open")
             else:
                 self._server.submit_command("gripper_close")
             state = self._server.get_state()
             pos = self._mm_to_robotiq_pos(state.gripper_position_mm)
-            return {"result": [pos, state.gripper_object_detected]}
+            return _ok({"position": pos, "object_detected": state.gripper_object_detected})
 
-        elif method == "grasp":
-            self._server.submit_command("gripper_close")
-            state = self._server.get_state()
-            return {"result": state.gripper_object_detected}
+        elif msg_type == 15:  # STOP
+            return _ok()
 
-        elif method == "stop":
-            return {"result": True}
+        elif msg_type == 11:  # RESET
+            return _ok()
 
-        elif method == "calibrate":
-            return {"result": True}
+        elif msg_type == 16:  # CALIBRATE
+            return _ok()
 
         else:
-            return {"error": f"unknown method: {method}"}
+            return {"msg_type": 100, "success": False, "message": f"unknown msg_type: {msg_type}", "data": None}
 
     # ------------------------------------------------------------------
     # Helpers
@@ -158,4 +162,5 @@ class GripperBridge:
             "current_ma": 0.0,
             "fault_code": 0,
             "fault_message": "",
+            "gripper_type": 1,  # ROBOTIQ_2F85
         }

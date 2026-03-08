@@ -159,6 +159,9 @@ class CameraBridge:
     async def _stream_frames(self, ws, fps, quality):
         interval = 1.0 / max(fps, 1)
         cameras = list(SIM_CAMERAS.keys())
+        _stream_count = 0
+
+        print(f"[camera-bridge] _stream_frames entered (fps={fps}, quality={quality}, cameras={cameras})")
 
         while self._running:
             t0 = time.monotonic()
@@ -192,8 +195,13 @@ class CameraBridge:
                 )
 
                 try:
-                    await ws.send(frame.pack())
+                    packed = frame.pack()
+                    await ws.send(packed)
+                    _stream_count += 1
+                    if _stream_count <= 3:
+                        print(f"[camera-bridge] Sent frame #{_stream_count}: cam={cam_name} size={len(packed)}")
                 except websockets.ConnectionClosed:
+                    print(f"[camera-bridge] Client disconnected after {_stream_count} frames")
                     return
 
                 # Stream depth frame for the same camera
