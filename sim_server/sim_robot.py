@@ -311,30 +311,46 @@ class SimRobot:
             return self._last_obs[obs_key]
         raise KeyError(f"Camera '{name}' not found in observations. Available: {list(self._last_obs.keys())}")
 
-    def render_camera_jpeg(self, name="robot0_agentview_center", width=256, height=256, quality=85):
-        """Render a JPEG frame from the named camera using MuJoCo's native renderer.
+    def _get_color_renderer(self, width, height):
+        """Get or create the shared color renderer for a given resolution."""
+        import mujoco
+        key = (width, height)
+        if not hasattr(self, '_color_renderers'):
+            self._color_renderers = {}
+        if key not in self._color_renderers:
+            self._color_renderers[key] = mujoco.Renderer(
+                self.sim.model._model, height, width
+            )
+        return self._color_renderers[key]
 
-        Works without offscreen rendering enabled — uses mujoco.Renderer directly.
-        """
+    def _get_depth_renderer(self, width, height):
+        """Get or create the shared depth renderer for a given resolution."""
+        import mujoco
+        key = (width, height)
+        if not hasattr(self, '_depth_renderers'):
+            self._depth_renderers = {}
+        if key not in self._depth_renderers:
+            r = mujoco.Renderer(self.sim.model._model, height, width)
+            r.enable_depth_rendering()
+            self._depth_renderers[key] = r
+        return self._depth_renderers[key]
+
+    def render_camera_jpeg(self, name="robot0_agentview_center", width=256, height=256, quality=85):
+        """Render a JPEG frame from the named camera using MuJoCo's native renderer."""
         import io
         import mujoco
         from PIL import Image
 
         model = self.sim.model._model
         data = self.sim.data._data
+        renderer = self._get_color_renderer(width, height)
 
-        if not hasattr(self, '_renderers'):
-            self._renderers = {}
-
-        key = (name, width, height)
-        if key not in self._renderers:
-            self._renderers[key] = mujoco.Renderer(model, height, width)
-
-        renderer = self._renderers[key]
         opt = mujoco.MjvOption()
         opt.geomgroup[0] = False       # hide collision geoms
         opt.sitegroup[:] = [False] * 6  # hide sites
 
+        # Sync computed quantities (body/site/geom positions) before rendering
+        mujoco.mj_forward(model, data)
         renderer.update_scene(data, camera=name, scene_option=opt)
         frame = renderer.render().copy()
 
@@ -349,20 +365,13 @@ class SimRobot:
 
         model = self.sim.model._model
         data = self.sim.data._data
+        renderer = self._get_depth_renderer(width, height)
 
-        if not hasattr(self, '_depth_renderers'):
-            self._depth_renderers = {}
-
-        key = (name, width, height)
-        if key not in self._depth_renderers:
-            self._depth_renderers[key] = mujoco.Renderer(model, height, width)
-            self._depth_renderers[key].enable_depth_rendering()
-
-        renderer = self._depth_renderers[key]
         opt = mujoco.MjvOption()
         opt.geomgroup[0] = False       # hide collision geoms
         opt.sitegroup[:] = [False] * 6  # hide sites
 
+        mujoco.mj_forward(model, data)
         renderer.update_scene(data, camera=name, scene_option=opt)
         depth_buf = renderer.render().copy()  # float32, normalized [0, 1]
 
@@ -371,12 +380,9 @@ class SimRobot:
         extent = model.stat.extent
         znear = model.vis.map.znear * extent
         zfar = model.vis.map.zfar * extent
-        # Linearize: depth_linear = znear * zfar / (zfar - depth_buf * (zfar - znear))
         depth_linear = znear * zfar / (zfar - depth_buf * (zfar - znear))
-        # Clamp to zfar (background)
         depth_linear[depth_buf >= 1.0] = 0  # 0 = invalid/no return
 
-        # Convert to uint16 millimeters for PNG encoding
         depth_mm = (depth_linear * 1000).astype(np.uint16)
         _, png_buf = cv2.imencode(".png", depth_mm)
         return png_buf.tobytes()

@@ -189,13 +189,18 @@ class SimServer:
             self._state.timestamp = time.time()
 
     def _process_commands(self):
-        """Drain the command queue and execute commands on the MuJoCo thread."""
+        """Drain the command queue and execute commands on the MuJoCo thread.
+
+        Returns True if any commands were processed (caller can skip idle step).
+        """
+        processed = False
         while True:
             try:
                 cmd = self._command_queue.get_nowait()
             except Empty:
                 break
 
+            processed = True
             try:
                 fn = getattr(self._sim_robot, cmd.method)
                 result = fn(*cmd.args, **cmd.kwargs)
@@ -207,6 +212,7 @@ class SimServer:
             except Exception as e:
                 if cmd.future is not None:
                     cmd.future.set_exception(e)
+        return processed
 
     def _idle_step(self):
         """Step physics with zero action to keep the sim alive.
@@ -299,10 +305,12 @@ class SimServer:
         try:
             while self._running:
                 # 1. Process any pending commands
-                self._process_commands()
+                had_commands = self._process_commands()
 
                 # 2. Idle step (keeps physics/renderer alive)
-                self._idle_step()
+                #    Skip if commands were processed — they already stepped physics.
+                if not had_commands:
+                    self._idle_step()
 
                 # 3. Update state buffer for bridges
                 self._update_state()

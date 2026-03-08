@@ -174,7 +174,9 @@ class CameraBridge:
                         DEFAULT_HEIGHT,
                         quality,
                     )
-                except Exception:
+                except Exception as e:
+                    print(f"[camera-bridge] render error for {cam_name}: {e}")
+                    await asyncio.sleep(0.1)
                     continue
 
                 meta = SIM_CAMERAS[cam_name]

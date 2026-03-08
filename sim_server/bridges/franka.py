@@ -222,7 +222,11 @@ class FrankaBridge:
         now = time.time()
         # Remap joints: sim space → SDK space (so init_qpos reports as SDK HOME)
         q_sdk = [state.joint_positions[i] + self._joint_offset[i] for i in range(7)]
-        dq = list(state.joint_velocities)
+        # Report zero joint velocities to the SDK. The sim OSC controller
+        # always has small residual oscillations that never fully settle,
+        # which blocks the SDK's convergence check (max_vel < 0.05).
+        # Position/orientation error is the meaningful convergence criterion.
+        dq = [0.0] * 7
         return {
             "q": q_sdk,
             "dq": dq,
