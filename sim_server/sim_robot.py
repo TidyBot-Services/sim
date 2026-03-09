@@ -706,6 +706,10 @@ class SimRobot:
         """
         self.sim.data.qpos[:] = self._initial_qpos
         self.sim.data.qvel[:] = np.zeros_like(self._initial_qvel)
+        self.sim.data.qacc[:] = 0
+        self.sim.data.qacc_warmstart[:] = 0
+        self.sim.data.ctrl[:] = 0
+        self.sim.data.qfrc_applied[:] = 0
         self.sim.forward()
         self._gripper_closed = False
 
@@ -714,6 +718,10 @@ class SimRobot:
             ad = self._zero_action_dict(base_mode=1)
             ad[f"{self._arm}_gripper"] = np.array([-1.0])  # open gripper
             self._step(ad)
+
+        # Zero out any residual velocity from settle steps
+        self.sim.data.qvel[:] = 0
+        self.sim.forward()
 
         print("[sim_robot] Soft reset complete")
         return {"status": "ok", "method": "soft_reset"}
