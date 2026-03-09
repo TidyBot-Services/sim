@@ -214,6 +214,17 @@ class BaseBridge:
         self._manager = None
         self._running = False
 
+    def _reset_origin(self):
+        """Re-calibrate the base origin after a scene reset."""
+        global _sim_base_instance
+        if _sim_base_instance is not None:
+            state = self._sim_server.get_state()
+            _sim_base_instance._origin_x = state.base_x
+            _sim_base_instance._origin_y = state.base_y
+            _sim_base_instance._origin_theta = state.base_theta
+            print(f"[base-bridge] Origin reset: x={state.base_x:.3f}, "
+                  f"y={state.base_y:.3f}, theta={state.base_theta:.3f}")
+
     def start(self):
         """Start the RPC server in a background thread."""
         global _sim_base_instance

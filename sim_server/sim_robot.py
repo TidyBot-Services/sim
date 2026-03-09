@@ -117,6 +117,11 @@ class SimRobot:
         self._gripper_closed = False
         self.gripper_open()
 
+        # Snapshot initial state for fast soft-reset (Option A)
+        self._initial_qpos = self.sim.data.qpos.copy()
+        self._initial_qvel = self.sim.data.qvel.copy()
+        print("[sim_robot] Saved initial state snapshot for soft reset")
+
     def _apply_saved_viewer_cam(self):
         """Load saved viewer camera config to apply on first render."""
         self._pending_viewer_cam = None
@@ -689,7 +694,57 @@ class SimRobot:
     # Scene management
     # ------------------------------------------------------------------
 
-    def reset_scene(self):
-        """Reset the environment to initial state."""
-        self._last_obs = self.env.reset()
+    def reset_to_initial(self):
+        """Soft reset: restore saved qpos/qvel snapshot without reloading the model.
+
+        This is fast (~1 physics step) and doesn't destroy the viewer or
+        recompile the MuJoCo model. Ideal for repeated trials of the same
+        scene.
+
+        Returns:
+            dict with reset status info
+        """
+        self.sim.data.qpos[:] = self._initial_qpos
+        self.sim.data.qvel[:] = np.zeros_like(self._initial_qvel)
+        self.sim.forward()
         self._gripper_closed = False
+
+        # Step a few times to let physics settle
+        for _ in range(5):
+            ad = self._zero_action_dict(base_mode=1)
+            ad[f"{self._arm}_gripper"] = np.array([-1.0])  # open gripper
+            self._step(ad)
+
+        print("[sim_robot] Soft reset complete")
+        return {"status": "ok", "method": "soft_reset"}
+
+    def reset_scene(self):
+        """Hard reset: full env.reset() + re-apply all post-init fixups.
+
+        Slower but supports scene randomization. Destroys and recreates
+        the viewer.
+        """
+        self._last_obs = self.env.reset()
+
+        # Re-fix cameras (Kitchen._postprocess_model overwrites them)
+        if hasattr(self, '_fix_tidyverse_cameras'):
+            self._fix_tidyverse_cameras()
+
+        # Re-apply home joint positions
+        for i, idx in enumerate(self.robot._ref_joint_pos_indexes):
+            self.sim.data.qpos[idx] = self._home_qpos[i]
+        self.sim.forward()
+
+        # Re-open gripper
+        self._gripper_closed = False
+        self.gripper_open()
+
+        # Re-snapshot for future soft resets
+        self._initial_qpos = self.sim.data.qpos.copy()
+        self._initial_qvel = self.sim.data.qvel.copy()
+
+        # Re-apply saved viewer camera
+        self._apply_saved_viewer_cam()
+
+        print("[sim_robot] Hard reset complete")
+        return {"status": "ok", "method": "hard_reset"}

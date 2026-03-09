@@ -258,6 +258,11 @@ class SimServer:
             _, setup_fn = hooks
             setup_fn(self._sim_robot)
 
+        # Re-snapshot state after scene hooks (hooks may move objects/robot)
+        self._sim_robot._initial_qpos = self._sim_robot.sim.data.qpos.copy()
+        self._sim_robot._initial_qvel = self._sim_robot.sim.data.qvel.copy()
+        print("[sim] Re-saved initial state snapshot (after scene hooks)")
+
         print("[sim] SimRobot ready")
 
     def start_bridges(self):

@@ -25,6 +25,10 @@ def main():
                         help="Disable the gripper bridge")
     parser.add_argument("--no-camera-bridge", action="store_true",
                         help="Disable the camera bridge")
+    parser.add_argument("--no-http-api", action="store_true",
+                        help="Disable the HTTP control API bridge")
+    parser.add_argument("--http-port", type=int, default=8081,
+                        help="Port for the HTTP control API (default: 8081)")
     args = parser.parse_args()
 
     server = SimServer(
@@ -48,6 +52,10 @@ def main():
     if not args.no_camera_bridge:
         from sim_server.bridges.camera import CameraBridge
         server.add_bridge(CameraBridge(server))
+
+    if not args.no_http_api:
+        from sim_server.bridges.http_api import HttpApiBridge
+        server.add_bridge(HttpApiBridge(server, port=args.http_port))
 
     server.run()
 
