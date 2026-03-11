@@ -14,14 +14,14 @@ from robosuite.controllers import load_composite_controller_config
 from sim_server.config import (
     ARM_MAX_STEPS,
     ARM_ORI_TOL,
-    ARM_OUTPUT_MAX_ORI,
-    ARM_OUTPUT_MAX_POS,
     ARM_POS_TOL,
     BASE_MAX_STEPS,
     BASE_ORI_TOL,
     BASE_POS_TOL,
     CONTROL_FREQ,
+    D_CART,
     GRIPPER_STEPS,
+    K_CART,
 )
 
 
@@ -53,6 +53,17 @@ class SimRobot:
     ):
         robot_name = robot
         controller_config = load_composite_controller_config(robot=robot_name)
+        # Override arm controller: JOINT_TORQUE instead of OSC_POSE
+        # Note: load_composite_controller_config flattens arms.right → right
+        arm_cfg = controller_config["body_parts"]["right"]
+        arm_cfg["type"] = "JOINT_TORQUE"
+        torque_limits = [80, 80, 80, 80, 80, 12, 12]
+        arm_cfg["input_max"] = torque_limits
+        arm_cfg["input_min"] = [-t for t in torque_limits]
+        arm_cfg["output_max"] = torque_limits
+        arm_cfg["output_min"] = [-t for t in torque_limits]
+        arm_cfg["use_torque_compensation"] = False
+        arm_cfg["interpolation"] = None
 
         self.env = robosuite.make(
             env_name=env_name,
@@ -90,21 +101,26 @@ class SimRobot:
         self._base_site_name = self.robot.robot_model.base.correct_naming("center")
         self._base_site_id = self.sim.model.site_name2id(self._base_site_name)
 
+        # Cache qvel indices early — needed for gravity comp in _zero_action_dict
+        self._qvel_idx = np.array(self.robot._ref_joint_vel_indexes)
+
         # Move arm to real-robot home joints so EE frame convention matches.
         # robosuite's init_qpos differs from the real Franka home, which would
         # cause EE-frame operations (dpitch, etc.) to rotate around wrong axes.
         SDK_HOME = np.array([0.0, -0.785, 0.0, -2.356, 0.0, 1.913, 0.785])
         for i, idx in enumerate(self.robot._ref_joint_pos_indexes):
             self.sim.data.qpos[idx] = SDK_HOME[i]
+        self.sim.data.qvel[self._qvel_idx] = 0
         self.sim.forward()
         self._home_qpos = SDK_HOME.copy()
         self._joint_offset = np.zeros(7)  # no offset needed — sim matches real
 
-        # OSC output maxima — used to normalise delta commands to [-1, 1]
-        self._output_max = np.array([
-            ARM_OUTPUT_MAX_POS, ARM_OUTPUT_MAX_POS, ARM_OUTPUT_MAX_POS,
-            ARM_OUTPUT_MAX_ORI, ARM_OUTPUT_MAX_ORI, ARM_OUTPUT_MAX_ORI,
-        ])
+        # EE site name for mj_jacSite
+        self._eef_site_name = self.robot.gripper[self._arm].important_sites["grip_site"]
+
+        # Cartesian impedance gains
+        self._K_cart = np.array(K_CART)
+        self._D_cart = np.array(D_CART)
 
         # Load saved viewer camera if available (must be before gripper_open
         # which calls _step → _maybe_apply_pending_cam)
@@ -223,9 +239,12 @@ class SimRobot:
         return self._last_obs
 
     def _zero_action_dict(self, base_mode=-1):
-        """Return an action dict that commands zero motion everywhere."""
+        """Return an action dict that commands zero motion everywhere.
+
+        Arm gets gravity/coriolis compensation torques so it holds position.
+        """
         return {
-            self._arm: np.zeros(6),
+            self._arm: self.sim.data.qfrc_bias[self._qvel_idx].copy(),
             f"{self._arm}_gripper": np.array([1.0 if self._gripper_closed else -1.0]),
             "base": np.zeros(3),
             "base_mode": np.array([base_mode]),
@@ -420,6 +439,54 @@ class SimRobot:
         return R_bw @ ori_error_axisangle
 
     # ------------------------------------------------------------------
+    # Cartesian impedance control
+    # ------------------------------------------------------------------
+
+    def _compute_cartesian_impedance_torques(self, target_pos_world, target_ori_world):
+        """Compute joint torques via Cartesian impedance control.
+
+        Matches the real Franka's torque callback: tau = J^T @ F + coriolis.
+
+        Args:
+            target_pos_world: Desired EE position in world frame (3,).
+            target_ori_world: Desired EE orientation in world frame (3,3).
+
+        Returns:
+            tau: Joint torques for the 7 arm joints (7,).
+        """
+        import mujoco
+
+        model = self.sim.model._model
+        data = self.sim.data._data
+        nv = model.nv
+
+        # Compute full Jacobian at EE site (each 3 x nv), then slice to arm joints
+        jacp = np.zeros((3, nv))
+        jacr = np.zeros((3, nv))
+        mujoco.mj_jacSite(model, data, jacp, jacr, self._eef_site_id)
+        J = np.vstack([jacp[:, self._qvel_idx], jacr[:, self._qvel_idx]])  # (6, 7)
+
+        # Current EE pose
+        cur_pos, cur_ori = self.get_ee_pose()
+
+        # Pose error (6,): [pos_error, ori_error]
+        pos_error = target_pos_world - cur_pos
+        ori_error = orientation_error(target_ori_world, cur_ori)
+        pose_error = np.concatenate([pos_error, ori_error])
+
+        # EE velocity in Cartesian space: dx = J @ dq
+        dq = self.sim.data.qvel[self._qvel_idx]
+        dx = J @ dq
+
+        # Impedance law: F = K * error - D * velocity
+        F = self._K_cart * pose_error - self._D_cart * dx
+
+        # Joint torques: tau = J^T @ F + gravity/coriolis compensation
+        tau = J.T @ F + self.sim.data.qfrc_bias[self._qvel_idx]
+
+        return tau
+
+    # ------------------------------------------------------------------
     # Blocking arm control
     # ------------------------------------------------------------------
 
@@ -427,8 +494,7 @@ class SimRobot:
         """One physics step tracking a target EE pose in base frame.
 
         Targets are in the robot's base frame (matching real Franka O_T_EE).
-        Converts to world frame internally for error computation, then sends
-        base-frame deltas to the OSC controller.
+        Converts to world frame internally, computes impedance torques.
         """
         target_pos = np.asarray(target_pos).flatten()[:3]
         target_ori_mat = np.asarray(target_ori_mat).reshape(3, 3)
@@ -441,20 +507,10 @@ class SimRobot:
         target_world_pos = T_wb[:3, :3] @ target_pos + T_wb[:3, 3]
         target_world_ori = T_wb[:3, :3] @ target_ori_mj
 
-        cur_pos, cur_ori = self.get_ee_pose()
-
-        pos_error_world = target_world_pos - cur_pos
-        ori_error_world = orientation_error(target_world_ori, cur_ori)
-
-        pos_error_base = self._world_pos_to_base_frame(cur_pos + pos_error_world) - \
-                         self._world_pos_to_base_frame(cur_pos)
-        ori_error_base = self._world_ori_error_to_base_frame(ori_error_world)
-
-        delta = np.concatenate([pos_error_base, ori_error_base])
-        norm_delta = np.clip(delta / self._output_max, -1.0, 1.0)
+        tau = self._compute_cartesian_impedance_torques(target_world_pos, target_world_ori)
 
         ad = self._zero_action_dict(base_mode=-1)
-        ad[self._arm] = norm_delta
+        ad[self._arm] = tau
         self._step(ad)
 
     def joint_positions_to_ee_pose(self, q):
@@ -493,35 +549,21 @@ class SimRobot:
     def move_ee_to_pose(self, target_pos, target_ori_mat):
         """Blocking loop: move the EE to a target world-frame pose.
 
-        Sends normalised delta actions to the OSC_POSE controller each step
-        until convergence or timeout.
+        Computes Cartesian impedance torques each step until convergence
+        or timeout.
         """
         for _ in range(ARM_MAX_STEPS):
             cur_pos, cur_ori = self.get_ee_pose()
 
-            # Position error in world frame
-            pos_error_world = target_pos - cur_pos
-
-            # Orientation error as axis-angle in world frame
-            ori_error_world = orientation_error(target_ori_mat, cur_ori)
-
-            # Check convergence
-            pos_err_mag = np.linalg.norm(pos_error_world)
-            ori_err_mag = np.linalg.norm(ori_error_world)
+            pos_err_mag = np.linalg.norm(target_pos - cur_pos)
+            ori_err_mag = np.linalg.norm(orientation_error(target_ori_mat, cur_ori))
             if pos_err_mag < ARM_POS_TOL and ori_err_mag < ARM_ORI_TOL:
                 break
 
-            # Transform errors to base frame (OSC uses input_ref_frame="base")
-            pos_error_base = self._world_pos_to_base_frame(cur_pos + pos_error_world) - \
-                             self._world_pos_to_base_frame(cur_pos)
-            ori_error_base = self._world_ori_error_to_base_frame(ori_error_world)
-
-            # Normalise to [-1, 1] for the controller
-            delta = np.concatenate([pos_error_base, ori_error_base])
-            norm_delta = np.clip(delta / self._output_max, -1.0, 1.0)
+            tau = self._compute_cartesian_impedance_torques(target_pos, target_ori_mat)
 
             ad = self._zero_action_dict(base_mode=-1)
-            ad[self._arm] = norm_delta
+            ad[self._arm] = tau
             self._step(ad)
 
     def move_ee_delta(self, dx=0.0, dy=0.0, dz=0.0, droll=0.0, dpitch=0.0, dyaw=0.0, frame="base"):
@@ -672,6 +714,7 @@ class SimRobot:
         self._gripper_closed = False
         for _ in range(GRIPPER_STEPS):
             ad = self._zero_action_dict(base_mode=-1)
+            ad[self._arm] = self.sim.data.qfrc_bias[self._qvel_idx].copy()
             ad[f"{self._arm}_gripper"] = np.array([-1.0])
             self._step(ad)
 
@@ -680,6 +723,7 @@ class SimRobot:
         self._gripper_closed = True
         for _ in range(GRIPPER_STEPS):
             ad = self._zero_action_dict(base_mode=-1)
+            ad[self._arm] = self.sim.data.qfrc_bias[self._qvel_idx].copy()
             ad[f"{self._arm}_gripper"] = np.array([1.0])
             self._step(ad)
 
@@ -713,9 +757,10 @@ class SimRobot:
         self.sim.forward()
         self._gripper_closed = False
 
-        # Step a few times to let physics settle
+        # Step a few times to let physics settle (with gravity comp so arm holds)
         for _ in range(5):
             ad = self._zero_action_dict(base_mode=1)
+            ad[self._arm] = self.sim.data.qfrc_bias[self._qvel_idx].copy()
             ad[f"{self._arm}_gripper"] = np.array([-1.0])  # open gripper
             self._step(ad)
 

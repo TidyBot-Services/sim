@@ -39,18 +39,18 @@ def main():
         has_renderer=not args.no_gui,
     )
 
-    # Register bridges
+    # Register bridges (imported from installed service packages)
     if not args.no_base_bridge:
-        from sim_server.bridges.base import BaseBridge
+        from base_server.server import BaseBridge
         server.add_bridge(BaseBridge(server))
     if not args.no_franka_bridge:
-        from sim_server.bridges.franka import FrankaBridge
+        from franka_server.server import FrankaBridge
         server.add_bridge(FrankaBridge(server))
     if not args.no_gripper_bridge:
-        from sim_server.bridges.gripper import GripperBridge
+        from gripper_server.server import GripperBridge
         server.add_bridge(GripperBridge(server))
     if not args.no_camera_bridge:
-        from sim_server.bridges.camera import CameraBridge
+        from camera_server.server import CameraBridge
         server.add_bridge(CameraBridge(server))
 
     if not args.no_http_api:

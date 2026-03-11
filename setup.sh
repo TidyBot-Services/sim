@@ -1,5 +1,5 @@
 #!/bin/bash
-# Set up the sim repo: clone dependencies and install TidyVerse robot.
+# Set up the sim repo: clone dependencies, install sim service packages, and install TidyVerse robot.
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -14,17 +14,36 @@ if [ ! -d "robocasa" ]; then
 fi
 
 echo ""
+echo "=== Cloning and installing sim service packages ==="
+
+for repo_info in \
+    "arm_franka_sim_service:https://github.com/TidyBot-Services/arm_franka_sim_service.git" \
+    "gripper_robotiq_sim_service:https://github.com/TidyBot-Services/gripper_robotiq_sim_service.git" \
+    "base_tidybot_sim_service:https://github.com/TidyBot-Services/base_tidybot_sim_service.git" \
+    "camera_realsense_sim_service:https://github.com/TidyBot-Services/camera_realsense_sim_service.git"; do
+
+    repo_name="${repo_info%%:*}"
+    repo_url="${repo_info#*:}"
+
+    if [ ! -d "$repo_name" ]; then
+        echo "Cloning $repo_name..."
+        git clone "$repo_url"
+    else
+        echo "Found $repo_name"
+    fi
+
+    pip install -e "$repo_name/"
+    echo "  Installed $repo_name"
+done
+
+echo ""
 echo "=== Checking for sibling repos ==="
 
-# agent_server, system_logger, common, and hardware repos live in the parent directory
+# agent_server, system_logger, common live in the parent directory
 for repo_info in \
     "agent_server:https://github.com/TidyBot-Services/agent_server.git" \
     "system_logger:https://github.com/TidyBot-Services/system_logger.git" \
-    "common:https://github.com/TidyBot-Services/common.git" \
-    "hardware/arm_franka_service:https://github.com/TidyBot-Services/arm_franka_service.git" \
-    "hardware/gripper_robotiq_service:https://github.com/TidyBot-Services/gripper_robotiq_service.git" \
-    "hardware/base_tidybot_service:https://github.com/TidyBot-Services/base_tidybot_service.git" \
-    "hardware/camera_realsense_service:https://github.com/TidyBot-Services/camera_realsense_service.git"; do
+    "common:https://github.com/TidyBot-Services/common.git"; do
 
     repo_name="${repo_info%%:*}"
     repo_url="${repo_info#*:}"

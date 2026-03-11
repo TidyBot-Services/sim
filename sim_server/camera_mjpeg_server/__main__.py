@@ -1,4 +1,4 @@
-"""Run the camera server: python -m camera_server"""
+"""Run the camera MJPEG server: python -m sim_server.camera_mjpeg_server"""
 
 import argparse
 

@@ -1,1 +1,1 @@
-"""Protocol bridges — translate between hardware server wire protocols and SimRobot."""
+"""Sim-only protocol bridges (HTTP API)."""

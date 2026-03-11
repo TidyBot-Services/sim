@@ -15,3 +15,9 @@ franka_interact/
 gripper_server/
 logs/
 .claude/
+
+# Sim service repos (cloned by setup.sh, each is its own git repo)
+arm_franka_sim_service/
+gripper_robotiq_sim_service/
+base_tidybot_sim_service/
+camera_realsense_sim_service/
