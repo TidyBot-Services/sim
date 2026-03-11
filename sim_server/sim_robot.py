@@ -20,8 +20,10 @@ from sim_server.config import (
     BASE_POS_TOL,
     CONTROL_FREQ,
     D_CART,
+    D_JOINT,
     GRIPPER_STEPS,
     K_CART,
+    K_JOINT,
 )
 
 
@@ -97,9 +99,14 @@ class SimRobot:
         # Store the EE site id for fast lookup
         self._eef_site_id = self.robot.eef_site_id[self._arm]
 
-        # Store base site name for reading base pose
+        # Store base site name for reading base pose (mobile base on floor)
         self._base_site_name = self.robot.robot_model.base.correct_naming("center")
         self._base_site_id = self.sim.model.site_name2id(self._base_site_name)
+
+        # Arm mount height above the mobile base center site.
+        # On the real robot, O_T_EE is relative to the arm flange (~0.47m above floor).
+        # We offset Z by this amount so EE Z matches real-robot conventions.
+        self._arm_base_z_offset = 0.47225
 
         # Cache qvel indices early — needed for gravity comp in _zero_action_dict
         self._qvel_idx = np.array(self.robot._ref_joint_vel_indexes)
@@ -121,6 +128,10 @@ class SimRobot:
         # Cartesian impedance gains
         self._K_cart = np.array(K_CART)
         self._D_cart = np.array(D_CART)
+
+        # Joint-space PD gains
+        self._K_joint = np.array(K_JOINT)
+        self._D_joint = np.array(D_JOINT)
 
         # Load saved viewer camera if available (must be before gripper_open
         # which calls _step → _maybe_apply_pending_cam)
@@ -262,9 +273,11 @@ class SimRobot:
         return pos, ori
 
     def get_ee_pose_in_base_frame(self):
-        """Return (pos[3], ori_mat[3,3]) of the EE in the robot base frame.
+        """Return (pos[3], ori_mat[3,3]) of the EE in the arm base frame.
 
-        Matches the real Franka's O_T_EE convention where O = base origin.
+        Matches the real Franka's O_T_EE convention where O = arm flange
+        (~0.47m above the mobile base).  We use the mobile base orientation
+        but offset Z by the arm mount height so EE Z values match hardware.
         """
         T_wb = self._get_base_transform()
         T_bw = T.pose_inv(T_wb)
@@ -279,8 +292,12 @@ class SimRobot:
 
         # EE in base frame, with Rz(+90°) correction to match real Franka
         T_be = T_bw @ T_we
+        pos = T_be[:3, 3].copy()
+        # Offset Z so EE pose is relative to arm mount (0.47m above floor),
+        # matching real Franka O_T_EE where O = arm flange base.
+        pos[2] -= self._arm_base_z_offset
         R_corrected = T_be[:3, :3] @ _EE_FRAME_CORRECTION
-        return T_be[:3, 3].copy(), R_corrected.copy()
+        return pos, R_corrected.copy()
 
     def get_arm_joints(self):
         """Return the 7-DOF arm joint positions."""
@@ -416,7 +433,7 @@ class SimRobot:
     # ------------------------------------------------------------------
 
     def _get_base_transform(self):
-        """Return the 4x4 world-to-base transformation matrix."""
+        """Return the 4x4 world-to-mobile-base transformation matrix."""
         pos = np.array(self.sim.data.site_xpos[self._base_site_id])
         mat = self.sim.data.site_xmat[self._base_site_id].reshape(3, 3)
         T_wb = np.eye(4)
@@ -490,10 +507,21 @@ class SimRobot:
     # Blocking arm control
     # ------------------------------------------------------------------
 
-    def track_ee_pose_step(self, target_pos, target_ori_mat):
-        """One physics step tracking a target EE pose in base frame.
+    def track_joint_positions_step(self, q_target):
+        """One physics step tracking target joint positions via joint PD."""
+        q_target = np.asarray(q_target).flatten()[:7]
+        q_cur = np.array([self.sim.data.qpos[i] for i in self.robot._ref_joint_pos_indexes])
+        dq = self.sim.data.qvel[self._qvel_idx]
+        tau = self._K_joint * (q_target - q_cur) - self._D_joint * dq
+        tau += self.sim.data.qfrc_bias[self._qvel_idx]
+        ad = self._zero_action_dict(base_mode=-1)
+        ad[self._arm] = tau
+        self._step(ad)
 
-        Targets are in the robot's base frame (matching real Franka O_T_EE).
+    def track_ee_pose_step(self, target_pos, target_ori_mat):
+        """One physics step tracking a target EE pose in arm base frame.
+
+        Targets are in the arm base frame (matching real Franka O_T_EE).
         Converts to world frame internally, computes impedance torques.
         """
         target_pos = np.asarray(target_pos).flatten()[:3]
@@ -502,9 +530,13 @@ class SimRobot:
         # Undo EE frame correction: Franka convention → MuJoCo site frame
         target_ori_mj = target_ori_mat @ _EE_FRAME_CORRECTION_INV
 
-        # Convert base-frame target to world frame
+        # Convert arm-base-frame target to world frame.
+        # Target Z is relative to arm mount; add offset to get mobile-base-frame Z,
+        # then transform to world frame using the mobile base transform.
+        target_in_base = target_pos.copy()
+        target_in_base[2] += self._arm_base_z_offset
         T_wb = self._get_base_transform()
-        target_world_pos = T_wb[:3, :3] @ target_pos + T_wb[:3, 3]
+        target_world_pos = T_wb[:3, :3] @ target_in_base + T_wb[:3, 3]
         target_world_ori = T_wb[:3, :3] @ target_ori_mj
 
         tau = self._compute_cartesian_impedance_torques(target_world_pos, target_world_ori)
@@ -514,10 +546,10 @@ class SimRobot:
         self._step(ad)
 
     def joint_positions_to_ee_pose(self, q):
-        """FK: given 7 joint positions, return (pos, ori_mat) of the EE in base frame.
+        """FK: given 7 joint positions, return (pos, ori_mat) of the EE in arm base frame.
 
         Temporarily sets qpos, calls forward, reads site, restores state.
-        Returns base-frame pose to match the real Franka O_T_EE convention.
+        Returns arm-base-frame pose to match the real Franka O_T_EE convention.
         """
         saved_qpos = self.sim.data.qpos.copy()
         saved_qvel = self.sim.data.qvel.copy()
@@ -529,7 +561,7 @@ class SimRobot:
         ee_pos_world = np.array(self.sim.data.site_xpos[self._eef_site_id])
         ee_ori_world = self.sim.data.site_xmat[self._eef_site_id].reshape(3, 3)
 
-        # Convert to base frame
+        # Convert to mobile base frame, then offset Z for arm mount
         T_wb = self._get_base_transform()
         T_bw = T.pose_inv(T_wb)
         T_we = np.eye(4)
@@ -538,6 +570,7 @@ class SimRobot:
         T_be = T_bw @ T_we
 
         pos = T_be[:3, 3].copy()
+        pos[2] -= self._arm_base_z_offset
         ori = (T_be[:3, :3] @ _EE_FRAME_CORRECTION).copy()
 
         self.sim.data.qpos[:] = saved_qpos
